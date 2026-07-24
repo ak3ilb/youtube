@@ -1,0 +1,56 @@
+{
+  "name": "youtube-video-mcp",
+  "version": "1.0.0",
+  "description": "A standalone YouTube MCP server with a native Go extraction engine",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "youtube-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist bin",
+    "build:ts": "tsc -p tsconfig.json",
+    "build:go": "node scripts/build-go.mjs",
+    "build": "npm run build:ts && npm run build:go",
+    "test:go": "go test ./...",
+    "test": "npm run build:ts && npm run test:go",
+    "smoke": "node scripts/smoke.mjs",
+    "prepublishOnly": "npm test && npm run build:go"
+  },
+  "keywords": [
+    "mcp",
+    "youtube",
+    "transcript",
+    "captions",
+    "typescript",
+    "golang"
+  ],
+  "author": "ak3ilb",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ak3ilb/youtube.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ak3ilb/youtube/issues"
+  },
+  "homepage": "https://github.com/ak3ilb/youtube#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2"
+  }
+}
