@@ -1,4 +1,4 @@
-# @ak3il/youtube-client — YouTube Client for Agents
+# youtube-client-mcp — YouTube Client for Agents
 
 **Free MIT** [Model Context Protocol](https://modelcontextprotocol.io) server **and** Node.js library for YouTube: **transcripts with timestamps**, **RAG citation packs**, chapters, captions, search, playlists, and channels.
 
@@ -10,14 +10,14 @@ Built for **Cursor**, **Claude Desktop**, and custom AI agents. Native **Go** ex
 
 | Use as | Install / run |
 | --- | --- |
-| **MCP** (Cursor / Claude) | `npx @ak3il/youtube-client` or `youtube-client` after install |
-| **Library** (Node scripts / apps) | `import { YouTubeClient } from "@ak3il/youtube-client"` |
+| **MCP** (Cursor / Claude) | `npx youtube-client-mcp` or `youtube-client` after install |
+| **Library** (Node scripts / apps) | `import { YouTubeClient } from "youtube-client-mcp"` |
 
 > Focus is **agent understanding** (summarize, cite, RAG) — not bulk piracy. Download is best-effort when YouTube returns direct stream URLs. Optional Google Data API key is free from Google; this package itself never charges.
 
 ---
 
-## Why @ak3il/youtube-client?
+## Why youtube-client-mcp?
 
 - **YouTube transcript MCP** — full captions with `[M:SS]` citations
 - **RAG-ready `get_video_pack`** — metadata + chapters + chunked text for embeddings
@@ -31,7 +31,7 @@ Built for **Cursor**, **Claude Desktop**, and custom AI agents. Native **Go** ex
 ## Install
 
 ```bash
-npm install @ak3il/youtube-client
+npm install youtube-client-mcp
 ```
 
 From source (needs [Go](https://go.dev/dl/) once to build the engine):
@@ -58,7 +58,7 @@ Server identity: **YouTube Client**.
   "mcpServers": {
     "youtube": {
       "command": "npx",
-      "args": ["-y", "@ak3il/youtube-client"],
+      "args": ["-y", "youtube-client-mcp"],
       "env": {
         "YTUBE_CACHE_DIR": "/absolute/path/to/.cache/youtube-client",
         "YTUBE_RATE_LIMIT": "60"
@@ -92,9 +92,9 @@ Same config under `mcpServers` (macOS: `~/Library/Application Support/Claude/cla
 ### CLI binary
 
 ```bash
-npm install -g @ak3il/youtube-client
+npm install -g youtube-client-mcp
 youtube-client
-# or: npx @ak3il/youtube-client
+# or: npx youtube-client-mcp
 ```
 
 Restart the host app after editing MCP config.
@@ -110,7 +110,7 @@ Restart the host app after editing MCP config.
 Import the client — **does not** start the MCP stdio server:
 
 ```ts
-import { YouTubeClient, YtubeError, youtube } from "@ak3il/youtube-client";
+import { YouTubeClient, YtubeError, youtube } from "youtube-client-mcp";
 
 const client = new YouTubeClient({ timeoutMs: 120_000 });
 
@@ -229,9 +229,9 @@ Each command prints one JSON object: `{"ok":true,"data":...}` or `{"ok":false,"e
 
 ---
 
-## @ak3il/youtube-client vs yt-dlp
+## youtube-client-mcp vs yt-dlp
 
-| | yt-dlp | @ak3il/youtube-client (YouTube Client) |
+| | yt-dlp | youtube-client-mcp (YouTube Client) |
 | --- | --- | --- |
 | Audience | Human CLI / scripts | AI agents (MCP) + Node library |
 | Strength | Formats & download | Transcript, citations, RAG packs |
@@ -247,7 +247,7 @@ Each command prints one JSON object: `{"ok":true,"data":...}` or `{"ok":false,"e
 Cursor / Claude / your Node app
     │  MCP stdio          OR         import YouTubeClient
     ▼                                ▼
-TypeScript (@ak3il/youtube-client)
+TypeScript (youtube-client-mcp)
     │ spawns JSON CLI
     ▼
 Go engine (ytube)
@@ -296,7 +296,7 @@ npm run smoke
 
 ## Links
 
-- **npm:** [`@ak3il/youtube-client`](https://www.npmjs.com/package/@ak3il/youtube-client)
+- **npm:** [`youtube-client-mcp`](https://www.npmjs.com/package/youtube-client-mcp)
 - **GitHub:** [ak3ilb/youtube](https://github.com/ak3ilb/youtube)
 - **Issues:** [github.com/ak3ilb/youtube/issues](https://github.com/ak3ilb/youtube/issues)
 

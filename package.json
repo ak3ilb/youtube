@@ -1,5 +1,5 @@
 {
-  "name": "@ak3il/youtube-client",
+  "name": "youtube-client-mcp",
   "version": "1.0.0",
   "description": "YouTube Client — free MCP server & Node library: transcripts with timestamps, RAG citation packs, chapters, captions, search. Native Go engine, no yt-dlp, no Python. For Cursor, Claude, and agents.",
   "publishConfig": {
@@ -22,7 +22,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "youtube-client": "./dist/index.js"
+    "youtube-client": "dist/index.js"
   },
   "files": [
     "dist",

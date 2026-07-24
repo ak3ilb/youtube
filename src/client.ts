@@ -2,9 +2,9 @@
  * YouTube Client — programmatic Node.js API (no MCP process required).
  *
  * Prefer this module when embedding extraction in your own app/scripts:
- *   import { YouTubeClient, YtubeError } from "@ak3il/youtube-client";
+ *   import { YouTubeClient, YtubeError } from "youtube-client-mcp";
  *
- * For Cursor / Claude agents, run the MCP binary instead (`npx @ak3il/youtube-client` / `youtube-client`).
+ * For Cursor / Claude agents, run the MCP binary instead (`npx youtube-client-mcp` / `youtube-client`).
  */
 export { runEngine, resolveEngine, YtubeError } from "./go-bridge.js";
 export type { EngineError, RunOptions } from "./go-bridge.js";
