@@ -13,6 +13,8 @@ Built for **Cursor**, **Claude Desktop**, and custom AI agents. Native **Go** ex
 | **MCP** (Cursor / Claude) | `npx youtube-client-mcp` or `youtube-client` after install |
 | **Library** (Node scripts / apps) | `import { YouTubeClient } from "youtube-client-mcp"` |
 
+> npm name is **`youtube-client-mcp`** because unscoped [`youtube-client`](https://www.npmjs.com/package/youtube-client) is already taken. Product / CLI remain **YouTube Client** / `youtube-client`.
+
 > Focus is **agent understanding** (summarize, cite, RAG) — not bulk piracy. Download is best-effort when YouTube returns direct stream URLs. Optional Google Data API key is free from Google; this package itself never charges.
 
 ---
