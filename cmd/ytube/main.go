@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -70,6 +71,12 @@ func main() {
 	cookiesFlag := fs.String("cookies", "", "path to Netscape cookies.txt")
 	apiKeyFlag := fs.String("api-key", "", "optional YouTube Data API v3 key (or YOUTUBE_API_KEY)")
 	chunkFlag := fs.Int("chunk-chars", 800, "target characters per RAG chunk (videopack)")
+	cursorFlag := fs.String("cursor", "", "resume position from a previous call's nextCursor")
+	maxCharsFlag := fs.Int("max-chars", 0, "max transcript characters per page (0 = whole transcript)")
+	topKFlag := fs.Int("top-k", 5, "passages to return (ask)")
+	repliesFlag := fs.Int("replies", 0, "expand replies for up to N comment threads")
+	includeChunksFlag := fs.Bool("include-chunks", false, "embed full chunk text in batch packs")
+	skipSponsorsFlag := fs.Bool("skip-sponsors", false, "drop SponsorBlock-flagged ranges (needs YTUBE_SPONSORBLOCK=1)")
 	timeoutFlag := fs.Duration("timeout", 30*time.Second, "per-request timeout")
 	if err := fs.Parse(os.Args[2:]); err != nil {
 		fail(&youtube.ExtractError{Code: "USAGE", Message: err.Error()})
@@ -101,6 +108,7 @@ func main() {
 		"captions": true, "chapters": true, "formats": true, "thumbnails": true, "download": true,
 		"subtitles": true, "related": true, "comments": true, "heatmap": true, "storyboards": true,
 		"manifests": true, "playlist": true, "channel": true, "videopack": true,
+		"ask": true, "sponsors": true, "packbatch": true,
 	}
 	if needsURL[command] && *urlFlag == "" {
 		fail(&youtube.ExtractError{Code: "USAGE", Message: "The --url flag is required for " + command})
@@ -118,7 +126,7 @@ func main() {
 		if err != nil {
 			fail(err)
 		}
-		emit(true, result, nil)
+		emit(true, youtube.PageTranscript(result, intCursor(*cursorFlag), *maxCharsFlag), nil)
 	case "transcript-clip":
 		start, end, err := parseRange(*startFlag, *endFlag)
 		if err != nil {
@@ -184,7 +192,9 @@ func main() {
 		}
 		emit(true, result, nil)
 	case "comments":
-		result, err := client.Comments(ctx, *urlFlag, *limitFlag, *sortFlag)
+		result, err := client.CommentsWithOptions(ctx, *urlFlag, youtube.CommentsOptions{
+			Limit: *limitFlag, Sort: *sortFlag, Cursor: *cursorFlag, Replies: *repliesFlag,
+		})
 		if err != nil {
 			fail(err)
 		}
@@ -229,18 +239,55 @@ func main() {
 		}
 		emit(true, result, nil)
 	case "videopack":
-		result, err := client.VideoPack(ctx, *urlFlag, *langFlag, *chunkFlag)
+		result, err := client.VideoPackWithOptions(ctx, *urlFlag, youtube.PackOptions{
+			Lang: *langFlag, ChunkChars: *chunkFlag, SkipSponsors: *skipSponsorsFlag,
+		})
 		if err != nil {
 			fail(err)
 		}
 		emit(true, result, nil)
+	case "packbatch":
+		result, err := client.BatchPackFor(ctx, *urlFlag, youtube.BatchOptions{
+			Lang: *langFlag, ChunkChars: *chunkFlag, Limit: *limitFlag,
+			Cursor: intCursor(*cursorFlag), IncludeChunks: *includeChunksFlag,
+			SkipSponsors: *skipSponsorsFlag,
+		})
+		if err != nil {
+			fail(err)
+		}
+		emit(true, result, nil)
+	case "ask":
+		if *queryFlag == "" {
+			fail(&youtube.ExtractError{Code: "USAGE", Message: "--query is required for ask"})
+		}
+		result, err := client.AskVideo(ctx, *urlFlag, *langFlag, *queryFlag, *topKFlag, *chunkFlag)
+		if err != nil {
+			fail(err)
+		}
+		emit(true, result, nil)
+	case "sponsors":
+		segments, err := client.SponsorSegments(ctx, *urlFlag)
+		if err != nil {
+			fail(err)
+		}
+		emit(true, map[string]any{"segments": segments, "count": len(segments)}, nil)
 	default:
 		fail(&youtube.ExtractError{Code: "USAGE", Message: fmt.Sprintf("Unknown command %q. %s", command, usage())})
 	}
 }
 
 func usage() string {
-	return "Usage: ytube <info|transcript|transcript-clip|transcript-search|subtitles|captions|chapters|formats|thumbnails|download|related|comments|heatmap|storyboards|manifests|playlist|channel|search|videopack> [options]"
+	return "Usage: ytube <info|transcript|transcript-clip|transcript-search|subtitles|captions|chapters|formats|thumbnails|download|related|comments|heatmap|storyboards|manifests|playlist|channel|search|videopack|packbatch|ask|sponsors> [options]"
+}
+
+// intCursor reads a numeric cursor; non-numeric cursors belong to token-based
+// commands (comments) and are ignored here.
+func intCursor(s string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 func parseRange(startS, endS string) (float64, float64, error) {

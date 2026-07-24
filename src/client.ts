@@ -19,6 +19,48 @@ export interface YouTubeClientOptions extends RunOptions {
   lang?: string;
 }
 
+export interface TranscriptOptions {
+  lang?: string;
+  /** Merge mid-phrase ASR cues into sentences (default true for auto captions). */
+  merge?: boolean;
+  /** Segment index to start from; use the previous page's `nextCursor`. */
+  cursor?: number;
+  /** Characters per page; omit to return the whole transcript at once. */
+  maxChars?: number;
+}
+
+export interface PackOptions {
+  lang?: string;
+  chunkChars?: number;
+  /** Drop SponsorBlock-flagged ranges (needs `YTUBE_SPONSORBLOCK=1`). */
+  skipSponsors?: boolean;
+}
+
+export interface BatchPackOptions extends PackOptions {
+  /** Videos to process in this call (default 5, max 25). */
+  limit?: number;
+  /** Resume index from a previous call's `nextCursor`. */
+  cursor?: number;
+  /** Embed full chunk text; omit for a cheap table of contents. */
+  includeChunks?: boolean;
+}
+
+export interface AskOptions {
+  lang?: string;
+  /** Passages to return (default 5). */
+  topK?: number;
+  chunkChars?: number;
+}
+
+export interface CommentsOptions {
+  limit?: number;
+  sort?: CommentSort;
+  /** Resume token from a previous call's `nextCursor`. */
+  cursor?: string;
+  /** Expand replies for up to N threads; each costs one extra request. */
+  replies?: number;
+}
+
 /**
  * High-level TypeScript wrapper around the native Go `ytube` engine.
  * Same capabilities as the MCP tools, usable from any Node 20+ script.
@@ -39,19 +81,77 @@ export class YouTubeClient {
    * Agent-ready briefing: metadata + chapters + citation chunks + markdown.
    * Primary entry for RAG / summarization workflows.
    */
-  getVideoPack(urlOrId: string, opts?: { lang?: string; chunkChars?: number }) {
+  getVideoPack(urlOrId: string, opts?: PackOptions) {
     return runEngine(
       "videopack",
       {
         url: urlOrId,
         lang: opts?.lang ?? this.options.lang,
         "chunk-chars": opts?.chunkChars ?? 800,
+        "skip-sponsors": opts?.skipSponsors,
       },
       this.opts({ timeoutMs: this.options.timeoutMs ?? 180_000 }),
     );
   }
 
-  getTranscript(urlOrId: string, opts?: { lang?: string; merge?: boolean }) {
+  /**
+   * Pack every video in a playlist, a channel's recent uploads, or an explicit
+   * list. Videos that fail (captions disabled, private, …) are reported in
+   * `failures` instead of aborting the batch; follow `nextCursor` for the rest.
+   */
+  getBatchPack(source: string, opts?: BatchPackOptions) {
+    return runEngine(
+      "packbatch",
+      {
+        url: source,
+        lang: opts?.lang ?? this.options.lang,
+        "chunk-chars": opts?.chunkChars ?? 800,
+        limit: opts?.limit,
+        cursor: opts?.cursor,
+        "include-chunks": opts?.includeChunks,
+        "skip-sponsors": opts?.skipSponsors,
+      },
+      this.opts({ timeoutMs: this.options.timeoutMs ?? 15 * 60 * 1000 }),
+    );
+  }
+
+  /** `getBatchPack` for a playlist URL or list= ID. */
+  getPlaylistPack(playlist: string, opts?: BatchPackOptions) {
+    return this.getBatchPack(playlist, opts);
+  }
+
+  /** `getBatchPack` for a channel URL, UC… ID, or @handle. */
+  getChannelPack(channel: string, opts?: BatchPackOptions) {
+    return this.getBatchPack(channel, opts);
+  }
+
+  /**
+   * Answer a question from one video without loading the whole transcript:
+   * returns the highest-scoring passages with citation timestamps and links.
+   */
+  askVideo(urlOrId: string, question: string, opts?: AskOptions) {
+    return runEngine(
+      "ask",
+      {
+        url: urlOrId,
+        query: question,
+        lang: opts?.lang ?? this.options.lang,
+        "top-k": opts?.topK,
+        "chunk-chars": opts?.chunkChars,
+      },
+      this.opts({ timeoutMs: this.options.timeoutMs ?? 180_000 }),
+    );
+  }
+
+  /**
+   * Community-flagged sponsor/intro/outro ranges. Requires the opt-in
+   * `YTUBE_SPONSORBLOCK=1` because it queries a third-party service.
+   */
+  getSponsorSegments(urlOrId: string) {
+    return runEngine("sponsors", { url: urlOrId }, this.opts());
+  }
+
+  getTranscript(urlOrId: string, opts?: TranscriptOptions) {
     const merge = opts?.merge;
     return runEngine(
       "transcript",
@@ -59,6 +159,8 @@ export class YouTubeClient {
         url: urlOrId,
         lang: opts?.lang ?? this.options.lang,
         merge: merge === undefined ? undefined : merge ? "true" : "false",
+        cursor: opts?.cursor,
+        "max-chars": opts?.maxChars,
       },
       this.opts(),
     );
@@ -133,10 +235,16 @@ export class YouTubeClient {
     return runEngine("related", { url: urlOrId }, this.opts());
   }
 
-  getComments(urlOrId: string, opts?: { limit?: number; sort?: CommentSort }) {
+  getComments(urlOrId: string, opts?: CommentsOptions) {
     return runEngine(
       "comments",
-      { url: urlOrId, limit: opts?.limit, sort: opts?.sort ?? "top" },
+      {
+        url: urlOrId,
+        limit: opts?.limit,
+        sort: opts?.sort ?? "top",
+        cursor: opts?.cursor,
+        replies: opts?.replies,
+      },
       this.opts(),
     );
   }

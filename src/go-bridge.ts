@@ -49,15 +49,15 @@ export interface RunOptions {
 /** Invoke a ytube command and return its parsed `data` payload. */
 export async function runEngine<T>(
   command: string,
-  flags: Record<string, string | number | undefined | null>,
+  flags: Record<string, string | number | boolean | undefined | null>,
   options: RunOptions = {},
 ): Promise<T> {
   const { command: bin, prefixArgs } = resolveEngine();
   const args = [...prefixArgs, command];
   for (const [key, value] of Object.entries(flags)) {
-    if (value !== undefined && value !== null && value !== "") {
-      args.push(`--${key}`, String(value));
-    }
+    if (value === undefined || value === null || value === "" || value === false) continue;
+    // `--key=value` is the only form Go's flag package accepts for booleans.
+    args.push(`--${key}=${String(value)}`);
   }
 
   const stdout = await new Promise<string>((resolve, reject) => {

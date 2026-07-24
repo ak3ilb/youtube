@@ -11,6 +11,7 @@ type RAGChunk struct {
 	ID           string  `json:"id"`
 	Text         string  `json:"text"`
 	Citation     string  `json:"citation"` // e.g. [1:07:12]
+	URL          string  `json:"url"`      // deep link that opens the video at Start
 	Start        float64 `json:"start"`
 	End          float64 `json:"end"`
 	Timestamp    string  `json:"timestamp"`
@@ -21,16 +22,27 @@ type RAGChunk struct {
 // VideoPack is an agent-oriented briefing for one video: metadata, chapters,
 // citation chunks, and a markdown document ready for RAG or chat context.
 type VideoPack struct {
-	Video         *VideoInfo `json:"video"`
-	Chapters      []Chapter  `json:"chapters"`
-	ChapterSource string     `json:"chapterSource"`
-	Language      string     `json:"language"`
-	MergedASR     bool       `json:"mergedAsr"`
-	ChunkCount    int        `json:"chunkCount"`
-	Chunks        []RAGChunk `json:"chunks"`
-	Markdown      string     `json:"markdown"`
-	HowToCite     string     `json:"howToCite"`
-	CacheHit      bool       `json:"cacheHit,omitempty"`
+	Video           *VideoInfo       `json:"video"`
+	Chapters        []Chapter        `json:"chapters"`
+	ChapterSource   string           `json:"chapterSource"`
+	Language        string           `json:"language"`
+	MergedASR       bool             `json:"mergedAsr"`
+	ChunkCount      int              `json:"chunkCount"`
+	Chunks          []RAGChunk       `json:"chunks"`
+	Markdown        string           `json:"markdown"`
+	HowToCite       string           `json:"howToCite"`
+	SponsorSegments []SponsorSegment `json:"sponsorSegments,omitempty"`
+	RemovedSeconds  float64          `json:"removedSeconds,omitempty"`
+	CacheHit        bool             `json:"cacheHit,omitempty"`
+}
+
+// PackOptions controls how a video pack is assembled.
+type PackOptions struct {
+	Lang       string
+	ChunkChars int
+	// SkipSponsors removes SponsorBlock-flagged ranges from the chunked text.
+	// Requires community data to be enabled (see sponsorBlockEnabled).
+	SkipSponsors bool
 }
 
 // BuildRAGChunks groups transcript segments into ~targetChars windows that
@@ -59,6 +71,7 @@ func BuildRAGChunks(videoID string, segments []TranscriptSegment, targetChars in
 		text := b.String()
 		chunks = append(chunks, RAGChunk{
 			ID: id, Text: text, Citation: "[" + cite + "]",
+			URL:   WatchURLAt(videoID, start),
 			Start: start, End: end,
 			Timestamp: FormatTimestamp(start), TimestampEnd: FormatTimestamp(end),
 			CharCount: len([]rune(text)),
@@ -104,13 +117,18 @@ func renderPackMarkdown(info *VideoInfo, chapters []Chapter, chunks []RAGChunk, 
 
 // VideoPack builds a citation-ready analysis pack for agents (RAG / briefing).
 func (c *Client) VideoPack(ctx context.Context, input, lang string, chunkChars int) (*VideoPack, error) {
+	return c.VideoPackWithOptions(ctx, input, PackOptions{Lang: lang, ChunkChars: chunkChars})
+}
+
+// VideoPackWithOptions is VideoPack with sponsor-skipping and chunk sizing.
+func (c *Client) VideoPackWithOptions(ctx context.Context, input string, opts PackOptions) (*VideoPack, error) {
 	id, err := ParseVideoID(input)
 	if err != nil {
 		return nil, err
 	}
-	cacheKey := id + "|" + lang + "|" + fmt.Sprintf("%d", chunkChars)
+	cacheKey := fmt.Sprintf("%s|%s|%d|%v", id, opts.Lang, opts.ChunkChars, opts.SkipSponsors)
 	var cached VideoPack
-	if c.cacheGet("videopack", cacheKey, &cached) {
+	if c.cacheGet("videopack2", cacheKey, &cached) {
 		cached.CacheHit = true
 		return &cached, nil
 	}
@@ -123,18 +141,32 @@ func (c *Client) VideoPack(ctx context.Context, input, lang string, chunkChars i
 	if err != nil {
 		return nil, err
 	}
-	tr, err := c.Transcript(ctx, input, lang)
+	tr, err := c.Transcript(ctx, input, opts.Lang)
 	if err != nil {
 		return nil, err
 	}
-	chunks := BuildRAGChunks(id, tr.Segments, chunkChars)
+
+	segments := tr.Segments
+	var sponsors []SponsorSegment
+	var removed float64
+	if opts.SkipSponsors {
+		sponsors, err = c.SponsorSegments(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		segments, removed = removeSponsorSegments(segments, sponsors)
+	}
+
+	chunks := BuildRAGChunks(id, segments, opts.ChunkChars)
 	pack := &VideoPack{
 		Video: info, Chapters: chRes.Chapters, ChapterSource: chRes.Source,
 		Language: tr.LanguageCode, MergedASR: tr.Merged,
 		ChunkCount: len(chunks), Chunks: chunks,
-		Markdown:  renderPackMarkdown(info, chRes.Chapters, chunks, tr.LanguageCode),
-		HowToCite: "Cite claims with timestamps like [1:07:12] matching chunk.citation / chunk.timestamp.",
+		Markdown:        renderPackMarkdown(info, chRes.Chapters, chunks, tr.LanguageCode),
+		HowToCite:       "Cite claims with timestamps like [1:07:12] matching chunk.citation, and link chunk.url to jump there.",
+		SponsorSegments: sponsors,
+		RemovedSeconds:  removed,
 	}
-	c.cacheSet("videopack", cacheKey, pack)
+	c.cacheSet("videopack2", cacheKey, pack)
 	return pack, nil
 }

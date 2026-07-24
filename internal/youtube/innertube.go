@@ -90,7 +90,15 @@ func (c *Client) call(ctx context.Context, endpoint string, profile innertubeCli
 	if profile.SDKInt > 0 {
 		clientCtx["androidSdkVersion"] = profile.SDKInt
 	}
+	if visitorData := os.Getenv("YTUBE_VISITOR_DATA"); visitorData != "" {
+		clientCtx["visitorData"] = visitorData
+	}
 	body := map[string]any{"context": map[string]any{"client": clientCtx}}
+	// A PO token minted by the user's browser unblocks streams and captions that
+	// YouTube now gates on BotGuard attestation.
+	if poToken := os.Getenv("YTUBE_PO_TOKEN"); poToken != "" && endpoint == "player" {
+		body["serviceIntegrityDimensions"] = map[string]any{"poToken": poToken}
+	}
 	for k, v := range payload {
 		body[k] = v
 	}

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -46,8 +48,11 @@ func (c *Client) initCache() {
 		}
 	}
 	limit := defaultRateLimit
-	if v := os.Getenv("YTUBE_RATE_LIMIT"); v == "0" {
-		limit = 0
+	if v := os.Getenv("YTUBE_RATE_LIMIT"); v != "" {
+		// 0 disables budgeting entirely; any other non-negative value raises or lowers it.
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 0 {
+			limit = n
+		}
 	}
 	c.cache = &diskCache{
 		dir:   defaultCacheDir(),

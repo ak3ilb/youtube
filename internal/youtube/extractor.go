@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -41,19 +42,37 @@ type Thumbnail struct {
 
 // VideoInfo is normalized single-video metadata.
 type VideoInfo struct {
-	ID              string      `json:"id"`
-	URL             string      `json:"url"`
-	Title           string      `json:"title"`
-	Description     string      `json:"description"`
-	ChannelID       string      `json:"channelId"`
-	ChannelName     string      `json:"channelName"`
-	DurationSeconds int         `json:"durationSeconds"`
-	ViewCount       uint64      `json:"viewCount,omitempty"`
-	PublishDate     string      `json:"publishDate,omitempty"`
-	Category        string      `json:"category,omitempty"`
-	Keywords        []string    `json:"keywords,omitempty"`
-	IsLive          bool        `json:"isLive"`
-	Thumbnails      []Thumbnail `json:"thumbnails"`
+	ID                    string      `json:"id"`
+	URL                   string      `json:"url"`
+	Title                 string      `json:"title"`
+	Description           string      `json:"description"`
+	ChannelID             string      `json:"channelId"`
+	ChannelName           string      `json:"channelName"`
+	ChannelURL            string      `json:"channelUrl,omitempty"`
+	DurationSeconds       int         `json:"durationSeconds"`
+	Duration              string      `json:"duration,omitempty"`
+	ViewCount             uint64      `json:"viewCount,omitempty"`
+	LikeCount             uint64      `json:"likeCount,omitempty"`
+	PublishDate           string      `json:"publishDate,omitempty"`
+	UploadDate            string      `json:"uploadDate,omitempty"`
+	Category              string      `json:"category,omitempty"`
+	Keywords              []string    `json:"keywords,omitempty"`
+	IsLive                bool        `json:"isLive"`
+	IsUnlisted            bool        `json:"isUnlisted,omitempty"`
+	IsFamilySafe          bool        `json:"isFamilySafe"`
+	AvailableCountryCount int         `json:"availableCountryCount,omitempty"`
+	EmbedURL              string      `json:"embedUrl,omitempty"`
+	Thumbnails            []Thumbnail `json:"thumbnails"`
+}
+
+// WatchURLAt builds a deep link that opens the video at a given moment, which
+// is what agents need when they cite a transcript timestamp.
+func WatchURLAt(videoID string, seconds float64) string {
+	base := "https://www.youtube.com/watch?v=" + videoID
+	if seconds <= 0 {
+		return base
+	}
+	return base + "&t=" + strconv.Itoa(int(seconds)) + "s"
 }
 
 // CaptionTrack describes one available caption/subtitle track.
@@ -232,8 +251,17 @@ type playerResponse struct {
 	} `json:"videoDetails"`
 	Microformat struct {
 		PlayerMicroformatRenderer struct {
-			PublishDate string `json:"publishDate"`
-			Category    string `json:"category"`
+			PublishDate        string   `json:"publishDate"`
+			UploadDate         string   `json:"uploadDate"`
+			Category           string   `json:"category"`
+			LikeCount          string   `json:"likeCount"`
+			IsFamilySafe       bool     `json:"isFamilySafe"`
+			IsUnlisted         bool     `json:"isUnlisted"`
+			AvailableCountries []string `json:"availableCountries"`
+			OwnerProfileURL    string   `json:"ownerProfileUrl"`
+			Embed              struct {
+				IframeURL string `json:"iframeUrl"`
+			} `json:"embed"`
 		} `json:"playerMicroformatRenderer"`
 	} `json:"microformat"`
 	Captions struct {
@@ -318,27 +346,84 @@ func (c *Client) Info(ctx context.Context, input string) (*VideoInfo, error) {
 		return nil, err
 	}
 	info := infoFromPlayer(id, p)
+	c.enrichMicroformat(ctx, id, info)
 	c.cacheSet("info", id, info)
 	return info, nil
+}
+
+// enrichMicroformat fills in the fields only the WEB player reports (category,
+// publish/upload date, likes, embed, availability). The mobile clients we prefer
+// for playable streams omit the microformat block entirely. Best-effort: the WEB
+// response is useful here even when it is not playable, and any failure just
+// leaves the extra fields empty.
+func (c *Client) enrichMicroformat(ctx context.Context, id string, info *VideoInfo) {
+	if info.Category != "" && info.PublishDate != "" && info.LikeCount > 0 {
+		return
+	}
+	if os.Getenv("YTUBE_RICH_METADATA") == "0" {
+		return
+	}
+	var p playerResponse
+	if err := c.callJSON(ctx, "player", clientWEB, map[string]any{
+		"videoId": id, "contentCheckOk": true, "racyCheckOk": true,
+	}, &p); err != nil {
+		return
+	}
+	micro := p.Microformat.PlayerMicroformatRenderer
+	if info.PublishDate == "" {
+		info.PublishDate = micro.PublishDate
+	}
+	if info.UploadDate == "" {
+		info.UploadDate = micro.UploadDate
+	}
+	if info.Category == "" {
+		info.Category = micro.Category
+	}
+	if info.LikeCount == 0 {
+		info.LikeCount, _ = strconv.ParseUint(micro.LikeCount, 10, 64)
+	}
+	if info.EmbedURL == "" {
+		info.EmbedURL = micro.Embed.IframeURL
+	}
+	if micro.OwnerProfileURL != "" {
+		info.ChannelURL = micro.OwnerProfileURL
+	}
+	if info.AvailableCountryCount == 0 {
+		info.AvailableCountryCount = len(micro.AvailableCountries)
+	}
+	info.IsFamilySafe = info.IsFamilySafe || micro.IsFamilySafe
+	info.IsUnlisted = info.IsUnlisted || micro.IsUnlisted
 }
 
 func infoFromPlayer(id string, p *playerResponse) *VideoInfo {
 	duration, _ := strconv.Atoi(p.VideoDetails.LengthSeconds)
 	views, _ := strconv.ParseUint(p.VideoDetails.ViewCount, 10, 64)
+	micro := p.Microformat.PlayerMicroformatRenderer
+	channelURL := micro.OwnerProfileURL
+	if channelURL == "" && p.VideoDetails.ChannelID != "" {
+		channelURL = "https://www.youtube.com/channel/" + p.VideoDetails.ChannelID
+	}
 	return &VideoInfo{
-		ID:              id,
-		URL:             "https://www.youtube.com/watch?v=" + id,
-		Title:           p.VideoDetails.Title,
-		Description:     p.VideoDetails.ShortDescription,
-		ChannelID:       p.VideoDetails.ChannelID,
-		ChannelName:     p.VideoDetails.Author,
-		DurationSeconds: duration,
-		ViewCount:       views,
-		PublishDate:     p.Microformat.PlayerMicroformatRenderer.PublishDate,
-		Category:        p.Microformat.PlayerMicroformatRenderer.Category,
-		Keywords:        p.VideoDetails.Keywords,
-		IsLive:          p.VideoDetails.IsLiveContent,
-		Thumbnails:      p.VideoDetails.Thumbnail.Thumbnails,
+		ID:                    id,
+		URL:                   "https://www.youtube.com/watch?v=" + id,
+		Title:                 p.VideoDetails.Title,
+		Description:           p.VideoDetails.ShortDescription,
+		ChannelID:             p.VideoDetails.ChannelID,
+		ChannelName:           p.VideoDetails.Author,
+		ChannelURL:            channelURL,
+		DurationSeconds:       duration,
+		Duration:              FormatTimestamp(float64(duration)),
+		ViewCount:             views,
+		PublishDate:           micro.PublishDate,
+		UploadDate:            micro.UploadDate,
+		Category:              micro.Category,
+		Keywords:              p.VideoDetails.Keywords,
+		IsLive:                p.VideoDetails.IsLiveContent,
+		IsUnlisted:            micro.IsUnlisted,
+		IsFamilySafe:          micro.IsFamilySafe,
+		AvailableCountryCount: len(micro.AvailableCountries),
+		EmbedURL:              micro.Embed.IframeURL,
+		Thumbnails:            p.VideoDetails.Thumbnail.Thumbnails,
 	}
 }
 

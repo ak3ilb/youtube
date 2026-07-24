@@ -173,6 +173,70 @@ func ParseChannelRef(input string) (browseID string, handle string, err error) {
 	}
 }
 
+// resolveChannelBrowseID turns an @handle or legacy username into a UC… id.
+// InnerTube's navigation/resolve_url is authoritative; channel search is only a
+// fallback because it can return a similarly named channel.
+func (c *Client) resolveChannelBrowseID(ctx context.Context, handle string) (string, error) {
+	if handle == "" {
+		return "", &ExtractError{Code: "INVALID_CHANNEL", Message: "No channel handle to resolve"}
+	}
+	var cached string
+	if c.cacheGet("channel-handle", handle, &cached) && cached != "" {
+		return cached, nil
+	}
+
+	path := strings.TrimPrefix(handle, "/")
+	if !strings.HasPrefix(path, "@") {
+		path = "@" + path
+	}
+	if data, err := c.call(ctx, "navigation/resolve_url", clientWEB,
+		map[string]any{"url": "https://www.youtube.com/" + path}); err == nil {
+		var root map[string]any
+		if json.Unmarshal(data, &root) == nil {
+			id := ""
+			walkJSON(root, func(key string, val any) bool {
+				if key == "browseEndpoint" {
+					if m, ok := val.(map[string]any); ok && id == "" {
+						if candidate := asString(m["browseId"]); channelIDPattern.MatchString(candidate) {
+							id = candidate
+						}
+					}
+				}
+				return id == ""
+			})
+			if id != "" {
+				c.cacheSet("channel-handle", handle, id)
+				return id, nil
+			}
+		}
+	}
+
+	data, err := c.call(ctx, "search", clientWEB, map[string]any{
+		"query": handle, "params": "EgIQAg%3D%3D", // channels filter
+	})
+	if err != nil {
+		return "", err
+	}
+	var root map[string]any
+	_ = json.Unmarshal(data, &root)
+	id := ""
+	walkJSON(root, func(key string, val any) bool {
+		if key == "channelRenderer" {
+			if m, ok := val.(map[string]any); ok && id == "" {
+				id = asString(m["channelId"])
+			}
+		}
+		return id == ""
+	})
+	if id == "" {
+		return "", &ExtractError{Code: "CHANNEL_NOT_FOUND",
+			Message: "Could not resolve channel handle " + handle,
+			Details: map[string]any{"handle": handle}}
+	}
+	c.cacheSet("channel-handle", handle, id)
+	return id, nil
+}
+
 // Channel returns channel metadata and a sample of recent videos.
 func (c *Client) Channel(ctx context.Context, input string, limit int) (map[string]any, error) {
 	browseID, handle, err := ParseChannelRef(input)
@@ -183,32 +247,13 @@ func (c *Client) Channel(ctx context.Context, input string, limit int) (map[stri
 		limit = 20
 	}
 	payload := map[string]any{}
-	if browseID != "" {
-		payload["browseId"] = browseID
-	} else {
-		// Resolve handle via search as a fallback browse.
-		data, err := c.call(ctx, "search", clientWEB, map[string]any{
-			"query": handle, "params": "EgIQAg%3D%3D", // channels filter
-		})
+	if browseID == "" {
+		browseID, err = c.resolveChannelBrowseID(ctx, handle)
 		if err != nil {
 			return nil, err
 		}
-		var root map[string]any
-		_ = json.Unmarshal(data, &root)
-		walkJSON(root, func(key string, val any) bool {
-			if key == "channelRenderer" {
-				if m, ok := val.(map[string]any); ok && browseID == "" {
-					browseID = asString(m["channelId"])
-				}
-			}
-			return browseID == ""
-		})
-		if browseID == "" {
-			return nil, &ExtractError{Code: "CHANNEL_NOT_FOUND",
-				Message: "Could not resolve channel handle " + handle}
-		}
-		payload["browseId"] = browseID
 	}
+	payload["browseId"] = browseID
 	data, err := c.call(ctx, "browse", clientWEB, payload)
 	if err != nil {
 		return nil, err

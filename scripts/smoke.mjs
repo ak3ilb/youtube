@@ -15,7 +15,18 @@ function record(name, passed, note) {
 }
 
 const client = new Client({ name: "smoke", version: "1.0.0" });
-await client.connect(new StdioClientTransport({ command: "node", args: ["dist/index.js"] }));
+// The SDK filters the child environment, so forward the engine's own settings
+// (cache dir, rate budget, cookies, API key) explicitly.
+const engineEnv = Object.fromEntries(
+  Object.entries(process.env).filter(([key]) => key.startsWith("YTUBE_") || key === "YOUTUBE_API_KEY"),
+);
+await client.connect(
+  new StdioClientTransport({
+    command: "node",
+    args: ["dist/index.js"],
+    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...engineEnv },
+  }),
+);
 
 async function call(tool, args) {
   const res = await client.callTool({ name: tool, arguments: args });
@@ -25,7 +36,7 @@ async function call(tool, args) {
 
 try {
   const { tools } = await client.listTools();
-  record("list_tools", tools.length >= 19, `count=${tools.length}`);
+  record("list_tools", tools.length >= 23, `count=${tools.length}`);
 
   let r = await call("get_video_info", { urlOrId: `https://www.youtube.com/watch?v=${VIDEO}` });
   record("get_video_info", !r.isError && r.body.title === "Me at the zoo", r.body.title);
@@ -36,6 +47,21 @@ try {
     "get_transcript_timestamps",
     !r.isError && seg0?.timestamp && Array.isArray(r.body.lines) && r.body.lines[0]?.startsWith("["),
     `ts=${seg0?.timestamp} lines=${r.body.lines?.length}`,
+  );
+
+  r = await call("get_transcript", { urlOrId: VIDEO, lang: "en", maxChars: 40 });
+  const firstPage = r.body;
+  record(
+    "get_transcript_paging",
+    !r.isError && firstPage.hasMore === true && firstPage.nextCursor > 0 && firstPage.totalChars > firstPage.pageChars,
+    `page=${firstPage.pageChars}/${firstPage.totalChars} next=${firstPage.nextCursor}`,
+  );
+
+  r = await call("get_transcript", { urlOrId: VIDEO, lang: "en", maxChars: 40, cursor: firstPage.nextCursor });
+  record(
+    "get_transcript_paging_resume",
+    !r.isError && r.body.cursor === firstPage.nextCursor && r.body.segments?.[0]?.text !== firstPage.segments?.[0]?.text,
+    `cursor=${r.body.cursor} segs=${r.body.segmentCount}`,
   );
 
   r = await call("get_transcript_clip", { urlOrId: VIDEO, lang: "en", start: "0:00", end: "0:10" });
@@ -85,11 +111,31 @@ try {
   r = await call("get_video_pack", { urlOrId: VIDEO, chunkChars: 200 });
   record("get_video_pack_cache", !r.isError && r.body.cacheHit === true, `cacheHit=${r.body.cacheHit}`);
 
+  r = await call("ask_video", { urlOrId: VIDEO, lang: "en", question: "what is cool about the elephants?", topK: 2 });
+  const passage = r.body.passages?.[0];
+  record(
+    "ask_video",
+    !r.isError && r.body.matched >= 1 && Boolean(passage?.chunk?.citation) && String(passage?.chunk?.url).includes("watch?v="),
+    `matched=${r.body.matched} cite=${passage?.chunk?.citation}`,
+  );
+
+  // The batch engine also accepts an explicit video list, which keeps this
+  // check independent of any third-party playlist staying public.
+  r = await call("get_playlist_pack", { urlOrId: `${VIDEO},dQw4w9WgXcQ`, limit: 2, chunkChars: 400 });
+  record(
+    "get_playlist_pack",
+    !r.isError && r.body.videos?.length >= 1 && r.body.totalChunks >= 1 && typeof r.body.markdown === "string",
+    `packed=${r.body.videos?.length} chunks=${r.body.totalChunks} failures=${r.body.failures?.length ?? 0}`,
+  );
+
   r = await call("get_related", { urlOrId: VIDEO });
   record("get_related", !r.isError, `count=${r.body.count}`);
 
   r = await call("get_comments", { urlOrId: VIDEO, limit: 5 });
   record("get_comments", !r.isError, `count=${r.body.count}`);
+
+  r = await call("get_comments", { urlOrId: VIDEO, limit: 3, sort: "newest" });
+  record("get_comments_sort", !r.isError && r.body.sort === "newest", `sort=${r.body.sort} count=${r.body.count}`);
 
   r = await call("get_heatmap", { urlOrId: VIDEO });
   record("get_heatmap", !r.isError, `available=${r.body.available}`);
@@ -113,6 +159,12 @@ try {
 
   r = await call("download_media", { urlOrId: VIDEO, outputPath: "/tmp/x.mp4", itag: 99999 });
   record("error: bad itag", r.isError && r.body.error === "FORMAT_NOT_FOUND", r.body.error);
+
+  // SponsorBlock is opt-in, so the default install must refuse it clearly.
+  r = await call("get_sponsor_segments", { urlOrId: VIDEO });
+  const sponsorOptIn = r.isError && r.body.error === "SPONSORBLOCK_DISABLED";
+  const sponsorEnabled = !r.isError && Array.isArray(r.body.segments);
+  record("get_sponsor_segments", sponsorOptIn || sponsorEnabled, r.isError ? r.body.error : `count=${r.body.count}`);
 } finally {
   await client.close();
 }

@@ -9,7 +9,7 @@ import { z } from "zod";
 
 import { runEngine, YtubeError } from "./go-bridge.js";
 
-const server = new McpServer({ name: "YouTube Client", version: "1.0.0" });
+const server = new McpServer({ name: "YouTube Client", version: "1.1.0" });
 
 const urlOrId = z
   .string()
@@ -62,7 +62,7 @@ server.registerTool(
   {
     title: "Get transcript with timestamps",
     description:
-      "Download the full transcript with timestamps. Auto-generated captions are sentence-merged by default (YouTube ASR chops mid-phrase into 2–4s cues; merging restores readable continuous text covering the whole video). Each segment includes start/end and [M:SS] timestamps. Optional lang; if missing, tries YouTube auto-translate.",
+      "Download the transcript with timestamps. Auto-generated captions are sentence-merged by default (YouTube ASR chops mid-phrase into 2–4s cues; merging restores readable continuous text covering the whole video). Each segment includes start/end and [M:SS] timestamps. Set maxChars to page through very long videos: the response returns nextCursor and hasMore, and you pass nextCursor back as cursor. Optional lang; if missing, tries YouTube auto-translate.",
     inputSchema: {
       urlOrId,
       lang,
@@ -70,14 +70,29 @@ server.registerTool(
         .boolean()
         .optional()
         .describe("Merge mid-phrase ASR cues into sentences (default true for auto-generated tracks)"),
+      maxChars: z
+        .number()
+        .int()
+        .positive()
+        .max(200_000)
+        .optional()
+        .describe("Max transcript characters per page; omit to return the whole transcript"),
+      cursor: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .describe("Segment index to resume from (use nextCursor from the previous page)"),
     },
   },
-  async ({ urlOrId, lang, merge }) =>
+  async ({ urlOrId, lang, merge, maxChars, cursor }) =>
     handle(() =>
       runEngine("transcript", {
         url: urlOrId,
         lang,
         merge: merge === undefined ? undefined : merge ? "true" : "false",
+        "max-chars": maxChars,
+        cursor,
       }),
     ),
 );
@@ -196,7 +211,7 @@ server.registerTool(
   {
     title: "Get video analysis pack (RAG)",
     description:
-      "Build an agent-ready briefing for one video: metadata, chapters, citation-tagged transcript chunks (e.g. [1:07:12]), and a markdown document for RAG/chat context. Uses disk cache so repeat analysis does not re-hit YouTube.",
+      "Build an agent-ready briefing for one video: metadata, chapters, citation-tagged transcript chunks (each with a [1:07:12] citation and a url that opens the video at that moment), and a markdown document for RAG/chat context. Uses disk cache so repeat analysis does not re-hit YouTube.",
     inputSchema: {
       urlOrId,
       lang,
@@ -207,12 +222,143 @@ server.registerTool(
         .max(4000)
         .optional()
         .describe("Target characters per RAG chunk (default 800)"),
+      skipSponsors: z
+        .boolean()
+        .optional()
+        .describe("Remove SponsorBlock-flagged ranges; requires YTUBE_SPONSORBLOCK=1"),
     },
   },
-  async ({ urlOrId, lang, chunkChars }) =>
+  async ({ urlOrId, lang, chunkChars, skipSponsors }) =>
     handle(() =>
-      runEngine("videopack", { url: urlOrId, lang, "chunk-chars": chunkChars ?? 800 }, { timeoutMs: 180_000 }),
+      runEngine(
+        "videopack",
+        { url: urlOrId, lang, "chunk-chars": chunkChars ?? 800, "skip-sponsors": skipSponsors },
+        { timeoutMs: 180_000 },
+      ),
     ),
+);
+
+const batchPackInput = {
+  lang,
+  chunkChars: z
+    .number()
+    .int()
+    .positive()
+    .max(4000)
+    .optional()
+    .describe("Target characters per RAG chunk (default 800)"),
+  limit: z
+    .number()
+    .int()
+    .positive()
+    .max(25)
+    .optional()
+    .describe("Videos to process in this call (default 5). Each video costs several YouTube requests."),
+  cursor: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe("Resume index from the previous call's nextCursor"),
+  includeChunks: z
+    .boolean()
+    .optional()
+    .describe("Embed full chunk text; omit for a cheap table of contents"),
+  skipSponsors: z.boolean().optional().describe("Remove SponsorBlock ranges; requires YTUBE_SPONSORBLOCK=1"),
+};
+
+type BatchPackArgs = {
+  lang?: string;
+  chunkChars?: number;
+  limit?: number;
+  cursor?: number;
+  includeChunks?: boolean;
+  skipSponsors?: boolean;
+};
+
+function runBatchPack(source: string, args: BatchPackArgs) {
+  return runEngine(
+    "packbatch",
+    {
+      url: source,
+      lang: args.lang,
+      "chunk-chars": args.chunkChars,
+      limit: args.limit,
+      cursor: args.cursor,
+      "include-chunks": args.includeChunks,
+      "skip-sponsors": args.skipSponsors,
+    },
+    { timeoutMs: 15 * 60 * 1000 },
+  );
+}
+
+server.registerTool(
+  "get_playlist_pack",
+  {
+    title: "Get playlist analysis pack (RAG)",
+    description:
+      "Build citation-ready packs for every video in a playlist. Videos without captions are reported in `failures` instead of failing the batch. Processes `limit` videos per call and returns nextCursor/hasMore so you can resume without redoing work (cached videos are free).",
+    inputSchema: {
+      urlOrId: z.string().min(1).describe("Playlist URL or list= ID (PL…, UU…, …)"),
+      ...batchPackInput,
+    },
+  },
+  async ({ urlOrId, ...args }) => handle(() => runBatchPack(urlOrId, args)),
+);
+
+server.registerTool(
+  "get_channel_pack",
+  {
+    title: "Get channel analysis pack (RAG)",
+    description:
+      "Build citation-ready packs for a channel's recent uploads. Accepts a channel URL, UC… ID, or @handle. Videos without captions are reported in `failures`; use nextCursor/hasMore to continue through the channel.",
+    inputSchema: {
+      urlOrId: z.string().min(1).describe("Channel URL, UC… ID, or @handle"),
+      ...batchPackInput,
+    },
+  },
+  async ({ urlOrId, ...args }) => handle(() => runBatchPack(urlOrId, args)),
+);
+
+server.registerTool(
+  "ask_video",
+  {
+    title: "Ask a question about a video",
+    description:
+      "Answer a question from one video without loading its whole transcript. Ranks the transcript's citation chunks against the question and returns only the best passages, each with a [M:SS] citation and a url that jumps to that moment, plus a ready-to-use markdown context block. Use this instead of get_transcript for long videos.",
+    inputSchema: {
+      urlOrId,
+      lang,
+      question: z.string().min(1).describe("The question to answer from the video"),
+      topK: z.number().int().positive().max(20).optional().describe("Passages to return (default 5)"),
+      chunkChars: z
+        .number()
+        .int()
+        .positive()
+        .max(4000)
+        .optional()
+        .describe("Passage size in characters (default 600)"),
+    },
+  },
+  async ({ urlOrId, lang, question, topK, chunkChars }) =>
+    handle(() =>
+      runEngine(
+        "ask",
+        { url: urlOrId, query: question, lang, "top-k": topK, "chunk-chars": chunkChars },
+        { timeoutMs: 180_000 },
+      ),
+    ),
+);
+
+server.registerTool(
+  "get_sponsor_segments",
+  {
+    title: "Get sponsor segments",
+    description:
+      "List community-flagged sponsor, intro, outro, and self-promo ranges for a video. Off by default: set YTUBE_SPONSORBLOCK=1 to enable, because it sends the video ID to the third-party SponsorBlock database.",
+    inputSchema: { urlOrId },
+  },
+  async ({ urlOrId }) => handle(() => runEngine("sponsors", { url: urlOrId })),
 );
 
 server.registerTool(
@@ -229,15 +375,24 @@ server.registerTool(
   "get_comments",
   {
     title: "Get comments",
-    description: "Fetch top-level comments for a video (author, text, likes, published). Optional limit and sort (top|newest).",
+    description:
+      "Fetch top-level comments for a video (author, text, likes, published, reply count). Sort by top or newest, expand replies for the first N threads, and page further with the returned nextCursor.",
     inputSchema: {
       urlOrId,
       limit: z.number().int().positive().max(100).optional().describe("Max comments to return (default 20)"),
       sort: z.enum(["top", "newest"]).optional().describe("Comment sort order"),
+      cursor: z.string().optional().describe("Continuation token from a previous call's nextCursor"),
+      replies: z
+        .number()
+        .int()
+        .nonnegative()
+        .max(20)
+        .optional()
+        .describe("Fetch replies for up to N threads (default 0; each costs one request)"),
     },
   },
-  async ({ urlOrId, limit, sort }) =>
-    handle(() => runEngine("comments", { url: urlOrId, limit, sort: sort ?? "top" })),
+  async ({ urlOrId, limit, sort, cursor, replies }) =>
+    handle(() => runEngine("comments", { url: urlOrId, limit, sort: sort ?? "top", cursor, replies })),
 );
 
 server.registerTool(
