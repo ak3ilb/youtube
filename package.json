@@ -1,10 +1,7 @@
 {
   "name": "youtube-client-mcp",
-  "version": "1.0.0",
-  "description": "YouTube Client — free MCP server & Node library: transcripts with timestamps, RAG citation packs, chapters, captions, search. Native Go engine, no yt-dlp, no Python. For Cursor, Claude, and agents.",
-  "publishConfig": {
-    "access": "public"
-  },
+  "version": "1.0.1",
+  "description": "YouTube Client — Node library and MCP server for transcripts, RAG citation packs, chapters, captions, and search. Native Go engine. No yt-dlp. No Python.",
   "type": "module",
   "main": "./dist/client.js",
   "types": "./dist/client.d.ts",
@@ -27,6 +24,7 @@
   "files": [
     "dist",
     "bin",
+    "docs",
     "README.md",
     "LICENSE"
   ],
