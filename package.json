@@ -1,12 +1,28 @@
 {
-  "name": "youtube-video-mcp",
+  "name": "@ak3il/youtube-client",
   "version": "1.0.0",
-  "description": "A standalone YouTube MCP server with a native Go extraction engine",
+  "description": "YouTube Client — free MCP server & Node library: transcripts with timestamps, RAG citation packs, chapters, captions, search. Native Go engine, no yt-dlp, no Python. For Cursor, Claude, and agents.",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "./dist/client.js",
+  "types": "./dist/client.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js",
+      "default": "./dist/client.js"
+    },
+    "./mcp": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "bin": {
-    "youtube-mcp": "dist/index.js"
+    "youtube-client": "./dist/index.js"
   },
   "files": [
     "dist",
@@ -25,12 +41,30 @@
     "prepublishOnly": "npm test && npm run build:go"
   },
   "keywords": [
-    "mcp",
+    "youtube-client",
     "youtube",
+    "youtube-mcp",
+    "mcp",
+    "model-context-protocol",
+    "cursor-mcp",
+    "claude-mcp",
+    "youtube-transcript",
+    "youtube-captions",
+    "youtube-subtitles",
+    "youtube-chapters",
+    "rag",
     "transcript",
     "captions",
+    "subtitles",
+    "innertube",
+    "ai-agent",
+    "llm",
     "typescript",
-    "golang"
+    "nodejs",
+    "golang",
+    "yt-dlp-alternative",
+    "youtube-api",
+    "video-analysis"
   ],
   "author": "ak3ilb",
   "license": "MIT",

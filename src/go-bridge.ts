@@ -49,13 +49,15 @@ export interface RunOptions {
 /** Invoke a ytube command and return its parsed `data` payload. */
 export async function runEngine<T>(
   command: string,
-  flags: Record<string, string | number | undefined>,
+  flags: Record<string, string | number | undefined | null>,
   options: RunOptions = {},
 ): Promise<T> {
   const { command: bin, prefixArgs } = resolveEngine();
   const args = [...prefixArgs, command];
   for (const [key, value] of Object.entries(flags)) {
-    if (value !== undefined && value !== "") args.push(`--${key}`, String(value));
+    if (value !== undefined && value !== null && value !== "") {
+      args.push(`--${key}`, String(value));
+    }
   }
 
   const stdout = await new Promise<string>((resolve, reject) => {

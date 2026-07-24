@@ -36,9 +36,9 @@ func ParseChapters(description string, durationSeconds int) []Chapter {
 		title := strings.TrimSpace(line[:loc[0]] + line[loc[1]:])
 		title = strings.Trim(title, " -–—:|•[]()\t")
 		if title == "" {
-			title = fmt.Sprintf("Chapter at %s", formatTimestamp(start))
+			title = fmt.Sprintf("Chapter at %s", FormatTimestamp(float64(start)))
 		}
-		chapters = append(chapters, Chapter{Title: title, StartSeconds: start, Timestamp: formatTimestamp(start)})
+		chapters = append(chapters, Chapter{Title: title, StartSeconds: start, Timestamp: FormatTimestamp(float64(start))})
 	}
 	// YouTube requires chapters to start at 0:00 and be ascending.
 	if len(chapters) < 2 || chapters[0].StartSeconds != 0 {
@@ -52,19 +52,34 @@ func ParseChapters(description string, durationSeconds int) []Chapter {
 	return chapters
 }
 
-func formatTimestamp(total int) string {
-	h, m, s := total/3600, (total%3600)/60, total%60
-	if h > 0 {
-		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
-	}
-	return fmt.Sprintf("%d:%02d", m, s)
+// ChaptersResult wraps chapters with their source.
+type ChaptersResult struct {
+	VideoID     string    `json:"videoId"`
+	Title       string    `json:"title"`
+	Chapters    []Chapter `json:"chapters"`
+	Count       int       `json:"count"`
+	HasChapters bool      `json:"hasChapters"`
+	Source      string    `json:"source"` // "markers" | "description" | "none"
 }
 
-// Chapters fetches video info and parses chapters from its description.
-func (c *Client) Chapters(ctx context.Context, input string) ([]Chapter, *VideoInfo, error) {
+// Chapters fetches video info and parses chapters from description (and later InnerTube markers).
+func (c *Client) Chapters(ctx context.Context, input string) (*ChaptersResult, error) {
 	info, err := c.Info(ctx, input)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return ParseChapters(info.Description, info.DurationSeconds), info, nil
+	chapters := ParseChapters(info.Description, info.DurationSeconds)
+	source := "none"
+	if len(chapters) > 0 {
+		source = "description"
+	}
+	// Prefer InnerTube markers when available via next endpoint.
+	if markers, err := c.chaptersFromNext(ctx, info.ID); err == nil && len(markers) > 0 {
+		chapters = markers
+		source = "markers"
+	}
+	return &ChaptersResult{
+		VideoID: info.ID, Title: info.Title, Chapters: chapters,
+		Count: len(chapters), HasChapters: len(chapters) > 0, Source: source,
+	}, nil
 }

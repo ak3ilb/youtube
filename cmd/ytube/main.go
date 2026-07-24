@@ -1,19 +1,9 @@
-// Command ytube is the JSON CLI consumed by the TypeScript MCP layer.
+// Command ytube is the JSON CLI consumed by the TypeScript MCP layer (YouTube Client).
 //
 // Every command prints exactly one JSON object to stdout:
 //
 //	{"ok":true,"data":...}
 //	{"ok":false,"error":{"code":...,"message":...,"details":...,"retryable":...}}
-//
-// Usage:
-//
-//	ytube info       --url <urlOrId>
-//	ytube transcript --url <urlOrId> [--lang en]
-//	ytube captions   --url <urlOrId>
-//	ytube chapters   --url <urlOrId>
-//	ytube formats    --url <urlOrId>
-//	ytube thumbnails --url <urlOrId>
-//	ytube download   --url <urlOrId> [--itag N] --out <path>
 package main
 
 import (
@@ -23,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/ak3ilb/youtube/internal/youtube"
@@ -61,26 +52,59 @@ func fail(err error) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fail(&youtube.ExtractError{Code: "USAGE",
-			Message: "Usage: ytube <info|transcript|captions|chapters|formats|thumbnails|download> --url <urlOrId> [options]"})
+		fail(&youtube.ExtractError{Code: "USAGE", Message: usage()})
 	}
 	command := os.Args[1]
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
-	urlFlag := fs.String("url", "", "YouTube video URL or 11-character ID")
-	langFlag := fs.String("lang", "", "caption language code (transcript only)")
-	itagFlag := fs.Int("itag", 0, "format itag (download only)")
-	outFlag := fs.String("out", "", "output file path (download only)")
+	urlFlag := fs.String("url", "", "YouTube URL or ID")
+	queryFlag := fs.String("query", "", "search / transcript-search query")
+	langFlag := fs.String("lang", "", "caption language code")
+	mergeFlag := fs.String("merge", "auto", "merge ASR mid-phrase cues: auto|true|false")
+	formatFlag := fs.String("format", "srt", "subtitle format: srt|vtt|ass|json|text")
+	itagFlag := fs.Int("itag", 0, "format itag")
+	outFlag := fs.String("out", "", "output file path")
+	limitFlag := fs.Int("limit", 0, "max items to return")
+	sortFlag := fs.String("sort", "top", "comments sort: top|newest")
+	startFlag := fs.String("start", "", "clip start (seconds or M:SS)")
+	endFlag := fs.String("end", "", "clip end (seconds or M:SS)")
+	cookiesFlag := fs.String("cookies", "", "path to Netscape cookies.txt")
+	apiKeyFlag := fs.String("api-key", "", "optional YouTube Data API v3 key (or YOUTUBE_API_KEY)")
+	chunkFlag := fs.Int("chunk-chars", 800, "target characters per RAG chunk (videopack)")
 	timeoutFlag := fs.Duration("timeout", 30*time.Second, "per-request timeout")
 	if err := fs.Parse(os.Args[2:]); err != nil {
 		fail(&youtube.ExtractError{Code: "USAGE", Message: err.Error()})
 	}
-	if *urlFlag == "" {
-		fail(&youtube.ExtractError{Code: "USAGE", Message: "The --url flag is required (YouTube URL or 11-character video ID)"})
-	}
 
 	client := youtube.NewClient(*timeoutFlag)
+	cookies := *cookiesFlag
+	if cookies == "" {
+		cookies = os.Getenv("YTUBE_COOKIES")
+	}
+	if cookies != "" {
+		if err := client.WithCookies(cookies); err != nil {
+			fail(err)
+		}
+	}
+	apiKey := *apiKeyFlag
+	if apiKey == "" {
+		apiKey = os.Getenv("YOUTUBE_API_KEY")
+	}
+	if apiKey != "" {
+		client.WithAPIKey(apiKey)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+
+	needsURL := map[string]bool{
+		"info": true, "transcript": true, "transcript-clip": true, "transcript-search": true,
+		"captions": true, "chapters": true, "formats": true, "thumbnails": true, "download": true,
+		"subtitles": true, "related": true, "comments": true, "heatmap": true, "storyboards": true,
+		"manifests": true, "playlist": true, "channel": true, "videopack": true,
+	}
+	if needsURL[command] && *urlFlag == "" {
+		fail(&youtube.ExtractError{Code: "USAGE", Message: "The --url flag is required for " + command})
+	}
 
 	switch command {
 	case "info":
@@ -90,7 +114,32 @@ func main() {
 		}
 		emit(true, result, nil)
 	case "transcript":
-		result, err := client.Transcript(ctx, *urlFlag, *langFlag)
+		result, err := client.TranscriptWithOptions(ctx, *urlFlag, transcriptOpts(*langFlag, *mergeFlag))
+		if err != nil {
+			fail(err)
+		}
+		emit(true, result, nil)
+	case "transcript-clip":
+		start, end, err := parseRange(*startFlag, *endFlag)
+		if err != nil {
+			fail(err)
+		}
+		result, err := client.TranscriptClip(ctx, *urlFlag, *langFlag, start, end)
+		if err != nil {
+			fail(err)
+		}
+		emit(true, result, nil)
+	case "transcript-search":
+		if *queryFlag == "" {
+			fail(&youtube.ExtractError{Code: "USAGE", Message: "--query is required for transcript-search"})
+		}
+		result, err := client.SearchTranscript(ctx, *urlFlag, *langFlag, *queryFlag, 1)
+		if err != nil {
+			fail(err)
+		}
+		emit(true, result, nil)
+	case "subtitles":
+		result, err := client.ExportSubtitles(ctx, *urlFlag, *langFlag, *formatFlag, *outFlag)
 		if err != nil {
 			fail(err)
 		}
@@ -102,15 +151,11 @@ func main() {
 		}
 		emit(true, map[string]any{"tracks": result, "count": len(result)}, nil)
 	case "chapters":
-		chapters, info, err := client.Chapters(ctx, *urlFlag)
+		result, err := client.Chapters(ctx, *urlFlag)
 		if err != nil {
 			fail(err)
 		}
-		emit(true, map[string]any{
-			"videoId": info.ID, "title": info.Title,
-			"chapters": chapters, "count": len(chapters),
-			"hasChapters": len(chapters) > 0,
-		}, nil)
+		emit(true, result, nil)
 	case "formats":
 		formats, clientName, err := client.Formats(ctx, *urlFlag)
 		if err != nil {
@@ -125,15 +170,116 @@ func main() {
 		emit(true, map[string]any{"videoId": info.ID, "thumbnails": info.Thumbnails}, nil)
 	case "download":
 		if *outFlag == "" {
-			fail(&youtube.ExtractError{Code: "USAGE", Message: "The --out flag is required for download (destination file path)"})
+			fail(&youtube.ExtractError{Code: "USAGE", Message: "The --out flag is required for download"})
 		}
 		result, err := client.Download(ctx, *urlFlag, *itagFlag, *outFlag)
 		if err != nil {
 			fail(err)
 		}
 		emit(true, result, nil)
+	case "related":
+		result, err := client.Related(ctx, *urlFlag)
+		if err != nil {
+			fail(err)
+		}
+		emit(true, result, nil)
+	case "comments":
+		result, err := client.Comments(ctx, *urlFlag, *limitFlag, *sortFlag)
+		if err != nil {
+			fail(err)
+		}
+		emit(true, result, nil)
+	case "heatmap":
+		result, err := client.Heatmap(ctx, *urlFlag)
+		if err != nil {
+			fail(err)
+		}
+		emit(true, result, nil)
+	case "storyboards":
+		result, err := client.Storyboards(ctx, *urlFlag)
+		if err != nil {
+			fail(err)
+		}
+		emit(true, result, nil)
+	case "manifests":
+		result, err := client.Manifests(ctx, *urlFlag)
+		if err != nil {
+			fail(err)
+		}
+		emit(true, result, nil)
+	case "playlist":
+		result, err := client.Playlist(ctx, *urlFlag, *limitFlag)
+		if err != nil {
+			fail(err)
+		}
+		emit(true, result, nil)
+	case "channel":
+		result, err := client.ChannelPreferAPI(ctx, *urlFlag, *limitFlag)
+		if err != nil {
+			fail(err)
+		}
+		emit(true, result, nil)
+	case "search":
+		if *queryFlag == "" {
+			fail(&youtube.ExtractError{Code: "USAGE", Message: "--query is required for search"})
+		}
+		result, err := client.SearchPreferAPI(ctx, *queryFlag, *limitFlag)
+		if err != nil {
+			fail(err)
+		}
+		emit(true, result, nil)
+	case "videopack":
+		result, err := client.VideoPack(ctx, *urlFlag, *langFlag, *chunkFlag)
+		if err != nil {
+			fail(err)
+		}
+		emit(true, result, nil)
 	default:
-		fail(&youtube.ExtractError{Code: "USAGE",
-			Message: fmt.Sprintf("Unknown command %q; expected info, transcript, captions, chapters, formats, thumbnails or download", command)})
+		fail(&youtube.ExtractError{Code: "USAGE", Message: fmt.Sprintf("Unknown command %q. %s", command, usage())})
 	}
+}
+
+func usage() string {
+	return "Usage: ytube <info|transcript|transcript-clip|transcript-search|subtitles|captions|chapters|formats|thumbnails|download|related|comments|heatmap|storyboards|manifests|playlist|channel|search|videopack> [options]"
+}
+
+func parseRange(startS, endS string) (float64, float64, error) {
+	var start, end float64
+	var err error
+	if startS != "" {
+		if start, err = parseTimeArg(startS); err != nil {
+			return 0, 0, err
+		}
+	}
+	if endS != "" {
+		if end, err = parseTimeArg(endS); err != nil {
+			return 0, 0, err
+		}
+	}
+	return start, end, nil
+}
+
+func parseTimeArg(s string) (float64, error) {
+	if strings.Contains(s, ":") {
+		return youtube.ParseTimestamp(s)
+	}
+	var f float64
+	_, err := fmt.Sscanf(s, "%f", &f)
+	if err != nil {
+		return 0, &youtube.ExtractError{Code: "INVALID_TIMESTAMP", Message: "Could not parse time value: " + s}
+	}
+	return f, nil
+}
+
+func transcriptOpts(lang, merge string) youtube.TranscriptOptions {
+	opts := youtube.TranscriptOptions{Lang: lang}
+	switch strings.ToLower(strings.TrimSpace(merge)) {
+	case "true", "1", "yes", "on":
+		v := true
+		opts.Merge = &v
+	case "false", "0", "no", "off":
+		v := false
+		opts.Merge = &v
+	}
+	return opts
 }
