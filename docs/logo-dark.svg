@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 320" width="1000" height="320" role="img" aria-label="YouTube Client: transcripts, RAG, MCP">
+  <title>YouTube Client</title>
+  <defs>
+    <linearGradient id="ytc-badge" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#FF5A4E"/>
+      <stop offset="0.55" stop-color="#F01A32"/>
+      <stop offset="1" stop-color="#B80022"/>
+    </linearGradient>
+    <linearGradient id="ytc-sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.24"/>
+      <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <g transform="translate(16 16) scale(0.5625)">
+    <rect x="32" y="32" width="448" height="448" rx="116" fill="url(#ytc-badge)"/>
+    <rect x="32" y="32" width="448" height="448" rx="116" fill="url(#ytc-sheen)"/>
+    <rect x="33.5" y="33.5" width="445" height="445" rx="114.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.18" stroke-width="3"/>
+    <path d="M 152 166 L 152 346 L 274 256 Z" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="32" stroke-linejoin="round"/>
+    <g fill="#FFFFFF">
+      <rect x="318" y="184" width="102" height="28" rx="14"/>
+      <rect x="318" y="242" width="80" height="28" rx="14" fill-opacity="0.86"/>
+      <rect x="318" y="300" width="56" height="28" rx="14" fill-opacity="0.72"/>
+    </g>
+  </g>
+
+  <g font-family="system-ui, -apple-system, 'Segoe UI', Inter, Roboto, 'Helvetica Neue', Arial, sans-serif">
+    <text fill="#F2F4F8" x="324" y="166" font-size="88" font-weight="700" letter-spacing="-2.5">YouTube Client</text>
+    <text fill="#9AA4B2" x="326" y="226" font-size="33" font-weight="500">Transcripts &#183; RAG &#183; MCP &#183; Pure Node.js</text>
+  </g>
+</svg>

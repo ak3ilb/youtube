@@ -1,6 +1,6 @@
 {
   "name": "youtube-client-mcp",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "YouTube Client — pure Node.js library and MCP server for reliable transcripts (Shorts + long videos), RAG citation packs, video Q&A, playlist/channel batches, chapters, captions, and search. No Go. No yt-dlp. No Python.",
   "type": "module",
   "main": "./dist/client.js",

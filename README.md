@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/ak3ilb/youtube/main/docs/logo-dark.svg">
+    <img src="https://raw.githubusercontent.com/ak3ilb/youtube/main/docs/logo.svg" alt="YouTube Client" width="420">
+  </picture>
+</p>
+
 # YouTube Client
 
 Node.js library and [MCP](https://modelcontextprotocol.io) server for YouTube analysis: transcripts with citations, RAG packs, chapters, captions, search, playlists, and channels.
