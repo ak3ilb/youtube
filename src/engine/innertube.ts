@@ -14,6 +14,7 @@ import {
   YOUTUBE_ORIGIN,
 } from "./cookies.js";
 import { classifyNetworkError, ExtractError, httpStatusError } from "./errors.js";
+import { getEngineFetch, type EngineFetch } from "./proxy.js";
 
 export const INNERTUBE_BASE = "https://www.youtube.com/youtubei/v1/";
 export const ANDROID_USER_AGENT =
@@ -224,7 +225,7 @@ export class Client {
       options.timeoutMs !== undefined && options.timeoutMs > 0
         ? options.timeoutMs
         : DEFAULT_TIMEOUT_MS;
-    this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.fetchImpl = options.fetch ?? (getEngineFetch() as FetchLike);
     this.cacheInstance = options.cache;
     this.apiKeyValue = options.apiKey;
   }

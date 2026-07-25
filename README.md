@@ -68,6 +68,22 @@ Where other tools are the better choice:
 Current limits: no PO-token/BotGuard attestation minting, no sig/nsig solver, no
 ffmpeg muxing, and no live-fragment downloads. See [Limitations](#limitations).
 
+### Why transcripts return `IP_BLOCKED` / 429
+
+YouTube's `/api/timedtext` endpoint sometimes answers with a small HTML
+**"Sorry..."** page and HTTP 429. That is an **IP reputation block**, not a
+parser bug — InnerTube player calls can still succeed while caption body GETs
+fail. Competing libraries from the same IP fail the same way.
+
+**Fixes that work:**
+
+1. Wait (often hours) until the block cools down — this package already stops
+   hammering timedtext for `YTUBE_TIMEDTEXT_COOLDOWN` and serves stale cache.
+2. Switch network (phone hotspot / VPN) and retry.
+3. Set a clean egress proxy: `YTUBE_PROXY=http://user:pass@host:port`
+   (or `HTTPS_PROXY`). Residential egress works best; datacenter IPs are often
+   blocked faster.
+
 ---
 
 ## Install
@@ -319,7 +335,8 @@ Example prompt:
 | `YTUBE_CACHE_TTL` | Fresh cache lifetime (default `6h`) |
 | `YTUBE_CACHE_MAX_STALE` | Max age for stale-cache rescue on retryable failures (default `168h`) |
 | `YTUBE_CACHE` | Set `0` to disable cache |
-| `YTUBE_TIMEDTEXT_COOLDOWN` | After a caption HTTP 429, skip live timedtext for this long and prefer stale cache (default `15m`; `0` disables) |
+| `YTUBE_PROXY` | HTTP(S) proxy for YouTube egress (`http://user:pass@host:port`). Also honors `HTTPS_PROXY` / `HTTP_PROXY`. Use this when timedtext returns **IP_BLOCKED** (429 Sorry page) |
+| `YTUBE_TIMEDTEXT_COOLDOWN` | After a caption HTTP 429/IP block, skip live timedtext for this long and prefer stale cache (default `15m`; `0` disables) |
 | `YTUBE_RATE_LIMIT` | Max billable YouTube calls per hour (default `60`; `0` disables) |
 | `YTUBE_COOKIES` | Path to Netscape `cookies.txt` for age-gated videos you can access |
 | `YOUTUBE_API_KEY` | Optional [YouTube Data API v3](https://developers.google.com/youtube/v3) key for more stable search/channel |
@@ -364,6 +381,7 @@ Your app / Cursor / Claude
 | --- | --- |
 | `RATE_BUDGET_EXCEEDED` | Local hourly budget reached — wait or raise `YTUBE_RATE_LIMIT` |
 | `RATE_LIMITED` | YouTube returned HTTP 429 — back off |
+| `IP_BLOCKED` | Caption GETs hit YouTube's "Sorry..." IP block — wait, change network/VPN, or set `YTUBE_PROXY` |
 | `NO_CAPTIONS` | No caption tracks on this video |
 | `LANGUAGE_NOT_AVAILABLE` | Requested language not available |
 | `AUTH_REQUIRED` | Sign-in / age gate — set `YTUBE_COOKIES` |

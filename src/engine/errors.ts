@@ -152,7 +152,25 @@ export function classifyNetworkError(value: unknown): ExtractError {
 }
 
 /** Port of Go's `httpStatusError`. */
-export function httpStatusError(status: number): ExtractError {
+export function httpStatusError(status: number, body = ""): ExtractError {
+  if (
+    (status === 429 || status === 503) &&
+    /sorry\.\.\.|unusual traffic|detected unusual/i.test(body.slice(0, 800))
+  ) {
+    return new ExtractError({
+      code: "IP_BLOCKED",
+      message:
+        "YouTube blocked caption downloads from this IP (HTTP 429 Sorry page). " +
+        "Wait, switch network/VPN, or set YTUBE_PROXY / HTTPS_PROXY to a clean egress. " +
+        "This is IP reputation — not a missing parser.",
+      retryable: true,
+      details: {
+        status,
+        hint: "YTUBE_PROXY=http://user:pass@host:port",
+        docs: "https://github.com/ak3ilb/youtube#configuration",
+      },
+    });
+  }
   switch (status) {
     case 429:
       return new ExtractError({

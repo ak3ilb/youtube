@@ -56,6 +56,7 @@ export * from "./ids.js";
 export * from "./innertube.js";
 export * from "./media.js";
 export * from "./paging.js";
+export * from "./proxy.js";
 export * from "./rag.js";
 export * from "./sponsorblock.js";
 export * from "./subtitles.js";

@@ -228,6 +228,7 @@ export function isRetryableExtract(err: unknown): boolean {
   }
   switch (err.code) {
     case "RATE_LIMITED":
+    case "IP_BLOCKED":
     case "RATE_BUDGET_EXCEEDED":
     case "NETWORK_ERROR":
     case "TIMEOUT":
@@ -1360,14 +1361,14 @@ export class Engine {
         }
       } catch (err) {
         lastErr = err;
-        if (isExtractError(err) && err.code === "RATE_LIMITED") {
+        if (isExtractError(err) && (err.code === "RATE_LIMITED" || err.code === "IP_BLOCKED")) {
           throw err;
         }
       }
     }
 
     // Fresh signature from an alternate client (skip when already rate-limited).
-    if (isExtractError(lastErr) && lastErr.code === "RATE_LIMITED") {
+    if (isExtractError(lastErr) && (lastErr.code === "RATE_LIMITED" || lastErr.code === "IP_BLOCKED")) {
       throw lastErr;
     }
     for (const profile of [clientIOS, clientANDROID]) {
@@ -1456,7 +1457,7 @@ export class Engine {
           return segs;
         }
       } catch (err) {
-        if (isExtractError(err) && err.code === "RATE_LIMITED") {
+        if (isExtractError(err) && (err.code === "RATE_LIMITED" || err.code === "IP_BLOCKED")) {
           throw err;
         }
       }
@@ -1487,19 +1488,12 @@ export class Engine {
     if (cookie !== "") {
       headers["Cookie"] = cookie;
     }
-    const timeout = AbortSignal.timeout(this.client.timeoutMs);
-    const response = await fetch(url, {
+    // httpGet uses the engine fetch (honors YTUBE_PROXY / HTTPS_PROXY).
+    const result = await this.client.httpGet(url, {
       headers,
-      signal: anySignal(timeout, signal),
-      redirect: "follow",
+      signal,
     });
-    const retryAfterRaw = response.headers.get("retry-after");
-    let retryAfterSec: number | undefined;
-    if (retryAfterRaw) {
-      const n = Number.parseInt(retryAfterRaw, 10);
-      if (Number.isFinite(n) && n > 0) retryAfterSec = n;
-    }
-    return { status: response.status, body: await response.text(), retryAfterSec };
+    return { status: result.status, body: result.body };
   }
 
   /** GET a caption body; first 429 arms the cooldown and stops further GETs. */
@@ -1520,13 +1514,15 @@ export class Engine {
       try {
         response = await this.captionFetch(u, signal);
       } catch (err) {
-        if (isExtractError(err) && err.code === "RATE_LIMITED") throw err;
+        if (isExtractError(err) && (err.code === "RATE_LIMITED" || err.code === "IP_BLOCKED")) {
+          throw err;
+        }
         lastErr = classifyNetworkError(err);
         continue;
       }
-      if (response.status === 429) {
+      if (response.status === 429 || response.status === 503) {
         markTimedtextRateLimited(response.retryAfterSec);
-        throw httpStatusError(response.status);
+        throw httpStatusError(response.status, response.body);
       }
       if (response.status >= 500) {
         lastErr = httpStatusError(response.status);
