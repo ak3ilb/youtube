@@ -153,6 +153,24 @@ export class DiskCache {
   }
 
   /**
+   * Reads checkpoint-like cache state without applying TTL expiration.
+   * Intended for progressive manifests whose continuation must never regress.
+   */
+  async getPersistent<T>(namespace: string, key: string): Promise<T | undefined> {
+    if (this.disabled) return undefined;
+    try {
+      const raw = await readFile(this.keyPath(namespace, key), "utf8");
+      const entry = JSON.parse(raw) as CacheEntry;
+      if (entry === null || typeof entry !== "object" || entry.payload === undefined) {
+        return undefined;
+      }
+      return entry.payload as T;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Returns a cached value even past TTL, as long as it is within the max-stale
    * window (`YTUBE_CACHE_MAX_STALE`, default 7 days). Used as a last resort
    * when a live fetch fails with a retryable error.

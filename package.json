@@ -1,6 +1,6 @@
 {
   "name": "youtube-client-mcp",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "description": "YouTube Client — pure Node.js library and MCP server for reliable transcripts (Shorts + long videos), RAG citation packs, video Q&A, playlist/channel batches, chapters, captions, and search. No Go. No yt-dlp. No Python.",
   "type": "module",
   "main": "./dist/client.js",
@@ -31,7 +31,7 @@
     "clean": "rm -rf dist",
     "build": "tsc -p tsconfig.json",
     "build:ts": "tsc -p tsconfig.json",
-    "test:unit": "tsx --test src/engine/engine.test.ts",
+    "test:unit": "tsx --test src/engine/*.test.ts",
     "test": "npm run build && npm run test:unit",
     "smoke": "node scripts/smoke.mjs",
     "prepublishOnly": "npm test"

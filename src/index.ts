@@ -293,6 +293,14 @@ const batchPackInput = {
     .optional()
     .describe("Embed full chunk text; omit for a cheap table of contents"),
   skipSponsors: z.boolean().optional().describe("Remove SponsorBlock ranges; requires YTUBE_SPONSORBLOCK=1"),
+  contentType: z
+    .enum(["all", "videos", "shorts"])
+    .optional()
+    .describe("For channel sources: include both tabs, long-form videos, or Shorts"),
+  detail: z
+    .enum(["summary", "analysis"])
+    .optional()
+    .describe("analysis embeds metadata, transcript, chapters, and RAG chunks"),
 };
 
 type BatchPackArgs = {
@@ -302,6 +310,8 @@ type BatchPackArgs = {
   cursor?: number;
   includeChunks?: boolean;
   skipSponsors?: boolean;
+  contentType?: "all" | "videos" | "shorts";
+  detail?: "summary" | "analysis";
 };
 
 function runBatchPack(source: string, args: BatchPackArgs) {
@@ -315,6 +325,8 @@ function runBatchPack(source: string, args: BatchPackArgs) {
       cursor: args.cursor,
       "include-chunks": args.includeChunks,
       "skip-sponsors": args.skipSponsors,
+      "content-type": args.contentType,
+      detail: args.detail,
     },
     { timeoutMs: 15 * 60 * 1000 },
   );
@@ -339,13 +351,76 @@ server.registerTool(
   {
     title: "Get channel analysis pack (RAG)",
     description:
-      "Build citation-ready packs for a channel's recent uploads. Accepts a channel URL, UC… ID, or @handle. Videos without captions are reported in `failures`; use nextCursor/hasMore to continue through the channel.",
+      "Progressively discover and pack every long-form upload and Short from a channel. Accepts a channel URL, UC… ID, or @handle. Use contentType to filter and detail=analysis for metadata + transcript + chapters + RAG chunks. Videos without captions are reported in failures; follow nextCursor until hasMore is false.",
     inputSchema: {
       urlOrId: z.string().min(1).describe("Channel URL, UC… ID, or @handle"),
       ...batchPackInput,
     },
   },
   async ({ urlOrId, ...args }) => handle(() => runBatchPack(urlOrId, args)),
+);
+
+server.registerTool(
+  "get_channel_catalog",
+  {
+    title: "List every channel video and Short",
+    description:
+      "Progressively enumerate a creator's Videos and Shorts tabs with continuation paging and deduplication. Follow nextCursor until hasMore is false; complete then confirms exhaustive discovery.",
+    inputSchema: {
+      urlOrId: z.string().min(1).describe("Channel URL, UC… ID, or @handle"),
+      contentType: z.enum(["all", "videos", "shorts"]).optional().describe("Catalog subset (default all)"),
+      limit: z.number().int().positive().max(200).optional().describe("Items in this page (default 50)"),
+      cursor: z.number().int().nonnegative().optional().describe("Resume index from nextCursor"),
+      refresh: z
+        .boolean()
+        .optional()
+        .describe("Start a fresh snapshot; use only with cursor 0 because previous cursors become invalid"),
+    },
+  },
+  async ({ urlOrId, contentType, limit, cursor, refresh }) =>
+    handle(() =>
+      runEngine(
+        "channelcatalog",
+        { url: urlOrId, "content-type": contentType, limit, cursor, refresh },
+        { timeoutMs: 15 * 60 * 1000 },
+      ),
+    ),
+);
+
+server.registerTool(
+  "export_channel_analysis",
+  {
+    title: "Export complete channel analysis",
+    description:
+      "Discover every requested long-form upload and Short, then write metadata, transcript, chapters, and RAG chunks as resumable JSONL. Returns local dataset/checkpoint paths and progress. Reuse jobId to resume a paused export after rate limits, IP blocks, or interruption.",
+    inputSchema: {
+      urlOrId: z.string().min(1).describe("Channel URL, UC… ID, or @handle"),
+      contentType: z.enum(["all", "videos", "shorts"]).optional().describe("Export subset (default all)"),
+      lang,
+      chunkChars: z.number().int().positive().max(4000).optional().describe("RAG chunk size (default 800)"),
+      skipSponsors: z.boolean().optional().describe("Remove SponsorBlock ranges; requires YTUBE_SPONSORBLOCK=1"),
+      jobId: z
+        .string()
+        .regex(/^[A-Za-z0-9_-]{8,96}$/)
+        .optional()
+        .describe("Job ID returned by a paused export; omit to use the deterministic channel/options job"),
+    },
+  },
+  async ({ urlOrId, contentType, lang: language, chunkChars, skipSponsors, jobId }) =>
+    handle(() =>
+      runEngine(
+        "channelpackall",
+        {
+          url: urlOrId,
+          "content-type": contentType,
+          lang: language,
+          "chunk-chars": chunkChars,
+          "skip-sponsors": skipSponsors,
+          "job-id": jobId,
+        },
+        { timeoutMs: 15 * 60 * 1000 },
+      ),
+    ),
 );
 
 server.registerTool(

@@ -14,6 +14,7 @@ import type {
   PackOptions,
   RAGChunk,
   SponsorSegment,
+  Transcript,
   TranscriptSegment,
   VideoInfo,
   VideoPack,
@@ -25,6 +26,21 @@ export const DEFAULT_CHUNK_CHARS = 800;
 
 export const HOW_TO_CITE_PACK =
   "Cite claims with timestamps like [1:07:12] matching chunk.citation, and link chunk.url to jump there.";
+
+function transcriptWithSegments(
+  transcript: Transcript,
+  segments: TranscriptSegment[],
+): Transcript {
+  if (segments === transcript.segments) return transcript;
+  return {
+    ...transcript,
+    segments,
+    segmentCount: segments.length,
+    lines: segments.map((segment) => `[${segment.timestamp}] ${segment.text}`),
+    text: segments.map((segment) => segment.text).join(" "),
+    chapters: undefined,
+  };
+}
 
 function runeLength(text: string): number {
   return [...text].length;
@@ -126,12 +142,33 @@ export async function videoPackWithOptions(
   opts: PackOptions = {},
   signal?: AbortSignal,
 ): Promise<VideoPack> {
+  return (await videoPackWithTranscript(engine, input, opts, signal)).pack;
+}
+
+/**
+ * Builds a pack and returns the transcript used to build it. This prevents
+ * analysis batches from downloading captions twice when disk caching is off.
+ */
+export async function videoPackWithTranscript(
+  engine: Engine,
+  input: string,
+  opts: PackOptions = {},
+  signal?: AbortSignal,
+): Promise<{ pack: VideoPack; transcript: Transcript }> {
   const id = parseVideoId(input);
   const cacheKey = `${id}|${opts.lang ?? ""}|${opts.chunkChars ?? 0}|${opts.skipSponsors === true}`;
   const cached = await engine.client.cache.get<VideoPack>("videopack2", cacheKey);
   if (cached !== undefined) {
     cached.cacheHit = true;
-    return cached;
+    const transcript = await engine.transcript(input, opts.lang, signal);
+    const analysisTranscript =
+      opts.skipSponsors === true && (cached.sponsorSegments?.length ?? 0) > 0
+        ? transcriptWithSegments(
+            transcript,
+            removeSponsorSegments(transcript.segments, cached.sponsorSegments ?? []).segments,
+          )
+        : transcript;
+    return { pack: cached, transcript: analysisTranscript };
   }
 
   const info = await engine.info(input, signal);
@@ -164,5 +201,5 @@ export async function videoPackWithOptions(
     removedSeconds: removed !== 0 ? removed : undefined,
   };
   await engine.client.cache.set("videopack2", cacheKey, pack);
-  return pack;
+  return { pack, transcript: transcriptWithSegments(transcript, segments) };
 }

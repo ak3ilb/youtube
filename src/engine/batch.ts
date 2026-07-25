@@ -7,14 +7,22 @@
  * because those would hit every remaining video too.
  */
 import { asRecord, asString } from "./chapters.js";
-import { channelPreferAPI } from "./dataapi.js";
+import { discoverChannelCatalog } from "./channel-catalog.js";
 import { playlist } from "./discovery.js";
 import { ExtractError, isExtractError } from "./errors.js";
 import { parseChannelRef, parsePlaylistID, parseVideoId } from "./ids.js";
-import { videoPackWithOptions } from "./rag.js";
+import { videoPackWithOptions, videoPackWithTranscript } from "./rag.js";
 import { formatTimestamp } from "./timestamps.js";
 import { errorText, type Engine } from "./transcript.js";
-import type { BatchFailure, BatchItem, BatchOptions, BatchPack, BatchSourceKind } from "./types.js";
+import type {
+  BatchFailure,
+  BatchItem,
+  BatchOptions,
+  BatchPack,
+  BatchSourceKind,
+  ChannelCatalogContentFilter,
+  ChannelItemContentType,
+} from "./types.js";
 
 export type { BatchFailure, BatchItem, BatchOptions, BatchPack } from "./types.js";
 
@@ -40,6 +48,10 @@ interface BatchSource {
   title: string;
   ids: string[];
   names: Map<string, string>;
+  contentTypes?: Map<string, ChannelItemContentType>;
+  catalogComplete?: boolean;
+  videoCount?: number;
+  shortCount?: number;
 }
 
 /**
@@ -50,6 +62,7 @@ export async function resolveBatchSource(
   engine: Engine,
   input: string,
   lookahead: number,
+  contentType: ChannelCatalogContentFilter = "all",
   signal?: AbortSignal,
 ): Promise<BatchSource> {
   const source = input.trim();
@@ -91,14 +104,27 @@ export async function resolveBatchSource(
     isChannel = false;
   }
   if (isChannel) {
-    const result = await channelPreferAPI(engine, source, lookahead, signal);
-    const refs = collectVideoRefs(result["videos"]);
+    const result = await discoverChannelCatalog(
+      engine,
+      source,
+      { contentType, ensure: lookahead },
+      signal,
+    );
+    const refs = collectVideoRefs(result.items);
+    const contentTypes = new Map<string, ChannelItemContentType>();
+    for (const item of result.items) {
+      contentTypes.set(item.id, item.contentType);
+    }
     return {
       kind: "channel",
-      id: typeof result["id"] === "string" ? result["id"] : "",
-      title: typeof result["title"] === "string" ? result["title"] : "",
+      id: result.id,
+      title: result.title,
       ids: refs.ids,
       names: refs.names,
+      contentTypes,
+      catalogComplete: result.complete,
+      videoCount: result.videoCount,
+      shortCount: result.shortCount,
     };
   }
 
@@ -178,7 +204,13 @@ export async function batchPackFor(
     chunkChars = 800;
   }
 
-  const src = await resolveBatchSource(engine, input, cursor + limit + 25, signal);
+  const src = await resolveBatchSource(
+    engine,
+    input,
+    cursor + limit + 25,
+    opts.contentType ?? "all",
+    signal,
+  );
   if (src.ids.length === 0) {
     throw new ExtractError({
       code: "EMPTY_BATCH_SOURCE",
@@ -196,15 +228,18 @@ export async function batchPackFor(
     index++;
 
     let pack;
+    let transcript;
     try {
-      pack = await videoPackWithOptions(
-        engine,
-        id,
-        { lang: opts.lang, chunkChars, skipSponsors: opts.skipSponsors },
-        signal,
-      );
+      const packOpts = { lang: opts.lang, chunkChars, skipSponsors: opts.skipSponsors };
+      if (opts.detail === "analysis") {
+        const analysis = await videoPackWithTranscript(engine, id, packOpts, signal);
+        pack = analysis.pack;
+        transcript = analysis.transcript;
+      } else {
+        pack = await videoPackWithOptions(engine, id, packOpts, signal);
+      }
     } catch (err) {
-      failures.push(batchFailure(id, src.names.get(id) ?? "", err));
+      failures.push(batchFailure(id, src.names.get(id) ?? "", err, src.contentTypes?.get(id)));
       if (isFatalBatchError(err)) {
         break;
       }
@@ -216,21 +251,30 @@ export async function batchPackFor(
       title: video?.title ?? "",
       url: video?.url ?? "",
       durationSeconds: video?.durationSeconds ?? 0,
+      contentType: src.contentTypes?.get(id),
       language: pack.language || undefined,
       chunkCount: pack.chunkCount,
-      chunks: opts.includeChunks === true ? pack.chunks : undefined,
+      chunks: opts.includeChunks === true || opts.detail === "analysis" ? pack.chunks : undefined,
+      video: opts.detail === "analysis" ? video ?? undefined : undefined,
+      transcript: opts.detail === "analysis" ? transcript : undefined,
+      chapters: opts.detail === "analysis" ? pack.chapters : undefined,
+      chapterSource: opts.detail === "analysis" ? pack.chapterSource : undefined,
       cacheHit: pack.cacheHit === true ? true : undefined,
     };
     totalChunks += pack.chunkCount;
     videos.push(item);
   }
 
-  const hasMore = index < src.ids.length;
+  const hasMore = index < src.ids.length || src.catalogComplete === false;
   const pack: BatchPack = {
     source: src.kind,
     sourceId: src.id || undefined,
     title: src.title || undefined,
     totalVideos: src.ids.length,
+    catalogComplete: src.kind === "channel" ? src.catalogComplete : undefined,
+    discoveredVideos: src.kind === "channel" ? src.ids.length : undefined,
+    videoCount: src.kind === "channel" ? src.videoCount : undefined,
+    shortCount: src.kind === "channel" ? src.shortCount : undefined,
     cursor,
     nextCursor: hasMore ? index : undefined,
     hasMore,
@@ -254,11 +298,17 @@ export async function batchPackFor(
   return pack;
 }
 
-function batchFailure(id: string, title: string, err: unknown): BatchFailure {
+function batchFailure(
+  id: string,
+  title: string,
+  err: unknown,
+  contentType?: ChannelItemContentType,
+): BatchFailure {
   if (isExtractError(err)) {
     return {
       videoId: id,
       title: title || undefined,
+      contentType,
       code: err.code,
       message: err.message,
       retryable: err.retryable,
@@ -267,6 +317,7 @@ function batchFailure(id: string, title: string, err: unknown): BatchFailure {
   return {
     videoId: id,
     title: title || undefined,
+    contentType,
     code: "INTERNAL_ERROR",
     message: errorText(err),
     retryable: false,

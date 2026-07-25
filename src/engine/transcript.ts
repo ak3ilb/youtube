@@ -43,6 +43,10 @@ import type {
   ChapterGroup,
   ChaptersResult,
   ChannelResult,
+  ChannelCatalogPage,
+  ChannelCatalogPageOptions,
+  ChannelExportOptions,
+  ChannelExportResult,
   CommentsOptions,
   CommentsResult,
   DownloadResult,
@@ -69,6 +73,8 @@ import type {
 
 import { askVideo as askVideoFor } from "./ask.js";
 import { batchPackFor } from "./batch.js";
+import { channelCatalogPage as channelCatalogPageFor } from "./channel-catalog.js";
+import { exportChannelAnalysis as exportChannelAnalysisFor } from "./channel-export.js";
 import { chaptersFor } from "./chapters.js";
 import { commentsWithOptions as commentsFor } from "./comments.js";
 import {
@@ -1711,6 +1717,24 @@ export class Engine {
     signal?: AbortSignal,
   ): Promise<BatchPack> {
     return batchPackFor(this, input, opts, signal);
+  }
+
+  /** Progressively discovers long-form uploads and Shorts (`channel-catalog.ts`). */
+  async channelCatalog(
+    input: string,
+    opts: ChannelCatalogPageOptions = {},
+    signal?: AbortSignal,
+  ): Promise<ChannelCatalogPage> {
+    return channelCatalogPageFor(this, input, opts, signal);
+  }
+
+  /** Checkpointed full-channel JSONL analysis export (`channel-export.ts`). */
+  async exportChannelAnalysis(
+    input: string,
+    opts: ChannelExportOptions = {},
+    signal?: AbortSignal,
+  ): Promise<ChannelExportResult> {
+    return exportChannelAnalysisFor(this, input, opts, signal);
   }
 
   /** Comment threads with paging and reply expansion (`comments.ts`). */

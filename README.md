@@ -33,7 +33,9 @@ const pack = await yt.getVideoPack("https://www.youtube.com/watch?v=jNQXAC9IVRw"
 - Transcripts with `[M:SS]` citations and jump links; ASR cues sentence-merged by default
 - `getVideoPack` — metadata, chapters, and RAG-ready chunks in one call
 - `askVideo` — answer a question from the best passages instead of the whole transcript
+- `getChannelCatalog` — exhaustively page a creator's Videos and Shorts tabs
 - `getPlaylistPack` / `getChannelPack` — batch many videos, resume with a cursor, skip failures
+- `exportChannelAnalysis` — checkpointed full-channel JSONL export that safely resumes
 - Paged transcripts (`maxChars` + `nextCursor`) for context-limited agents
 - Chapters, captions, related videos, comments (sort, replies, paging), playlists, channels, search
 - Local disk cache and hourly rate budget
@@ -146,7 +148,9 @@ const info = await youtube.getVideoInfo("jNQXAC9IVRw");
 | `getVideoPack(url, opts?)` | Metadata + chapters + citation chunks + markdown (primary for RAG) |
 | `askVideo(url, question, opts?)` | Best-matching passages with citations and jump links |
 | `getPlaylistPack(url, opts?)` | Batch packs for a playlist, resumable via `nextCursor` |
-| `getChannelPack(url, opts?)` | Batch packs for a channel's recent uploads |
+| `getChannelPack(url, opts?)` | Resumable analysis pages across all channel Videos and Shorts |
+| `getChannelCatalog(url, opts?)` | Exhaustive Videos/Shorts catalog with content filtering and cursors |
+| `exportChannelAnalysis(url, opts?)` | Checkpointed full-channel metadata + transcript + chapters + RAG JSONL |
 | `getVideoInfo(url)` | Title, channel, duration, views, likes, category, publish date, thumbnails |
 | `getTranscript(url, opts?)` | Reliable transcript (Shorts + long); lang chains, paging, words, chapters |
 | `diagnoseTranscript(url, opts?)` | Caption ladder diagnostics (clients, tracks, body, cache, budget) |
@@ -242,7 +246,7 @@ the key), escalate across ANDROID → IOS → WEB caption clients, retry empty
 bodies with fresh signatures / optional `YTUBE_PO_TOKEN`, and serve a stale
 cached copy when YouTube is temporarily unreachable.
 
-### Batch a playlist or channel
+### Batch a playlist or creator channel
 
 Each video costs several YouTube requests, so batches process a small slice per
 call. Videos that cannot be packed (captions disabled, private, region-blocked)
@@ -263,16 +267,75 @@ do {
 } while (cursor);
 ```
 
-`getChannelPack` accepts a channel URL, `UC…` ID, or `@handle`. Both methods also
-accept a comma-separated list of video URLs or IDs.
+`getChannelPack` accepts a channel URL (including `/videos` or `/shorts`), `UC…`
+ID, or `@handle`. Channel discovery follows both tab continuation chains instead
+of stopping at the first page. Use `contentType` to select `"all"`, `"videos"`,
+or `"shorts"` and `detail: "analysis"` to embed full metadata, transcript
+segments, chapters, and RAG chunks:
+
+```ts
+let cursor = 0;
+do {
+  const page = await client.getChannelPack("https://youtube.com/@mkbhd", {
+    contentType: "all",
+    detail: "analysis",
+    limit: 10,
+    cursor,
+  });
+
+  for (const item of page.videos) {
+    console.log(item.contentType, item.video?.title, item.transcript?.segmentCount);
+  }
+  cursor = page.nextCursor;
+} while (cursor !== undefined);
+```
+
+To list the complete catalog without downloading transcripts:
+
+```ts
+const first = await client.getChannelCatalog("@mkbhd", {
+  contentType: "shorts",
+  limit: 100,
+  refresh: true,
+});
+console.log(first.items, first.nextCursor, first.complete);
+```
+
+Catalog cursors belong to a stable cached snapshot so long jobs never shift
+under newly uploaded videos. Start again with `refresh: true` and `cursor: 0`
+when you want a fresh snapshot; old cursors are intentionally invalidated.
+
+For a large creator, export analysis records to disk instead of returning every
+transcript in one response:
+
+```ts
+const job = await client.exportChannelAnalysis("@mkbhd", {
+  contentType: "all",
+  lang: "en",
+});
+
+console.log(job.status, job.dataPath, job.checkpointPath);
+// If paused by a rate limit, IP block, timeout, or restart:
+const resumed = await client.exportChannelAnalysis("@mkbhd", {
+  contentType: "all",
+  lang: "en",
+  jobId: job.jobId,
+});
+```
+
+The JSONL file contains one record per discovered item. Successful records carry
+`video`, `transcript`, `chapters`, and `chunks`; unavailable/private/captionless
+videos produce structured `failure` records. Global failures such as
+`IP_BLOCKED` pause before advancing the current video, so resume retries it.
 
 ---
 
 ## Use as MCP (Cursor / Claude)
 
-Server name: **YouTube Client**. The 23 tools mirror the library methods above,
+Server name: **YouTube Client**. The 26 tools mirror the library methods above,
 including `get_video_pack`, `ask_video`, `get_playlist_pack`, `get_channel_pack`,
-`get_transcript` (with `maxChars` / `cursor` paging), and `get_comments`.
+`get_channel_catalog`, `export_channel_analysis`, `get_transcript` (with
+`maxChars` / `cursor` paging), and `get_comments`.
 
 ![MCP usage — YouTube Client tools in an agent chat](docs/mcp-usage.jpg)
 
@@ -339,6 +402,7 @@ Example prompt:
 | Variable | Description |
 | --- | --- |
 | `YTUBE_CACHE_DIR` | Disk cache directory (default `~/.cache/youtube-client`) |
+| `YTUBE_EXPORT_DIR` | Full-channel JSONL/checkpoint directory (default: `<YTUBE_CACHE_DIR>/exports`) |
 | `YTUBE_CACHE_TTL` | Fresh cache lifetime (default `6h`) |
 | `YTUBE_CACHE_MAX_STALE` | Max age for stale-cache rescue on retryable failures (default `168h`) |
 | `YTUBE_CACHE` | Set `0` to disable cache |
@@ -407,7 +471,8 @@ Your app / Cursor / Claude
 - No ffmpeg muxing (video + audio as separate streams when needed)
 - Live fragment download is not supported (manifests only)
 - Heatmap, related, and storyboards depend on what YouTube returns for the video
-- Batch packs process at most 25 videos per call, by design, to protect your IP
+- Paged batch packs process at most 25 videos per call, by design, to protect your IP
+- Full-channel export is sequential and checkpointed; caption availability still depends on each video and YouTube's IP/rate limits
 - `askVideo` ranks passages lexically (BM25); it retrieves context rather than generating an answer
 - Videos without captions cannot be transcribed; there is no speech-to-text fallback
 

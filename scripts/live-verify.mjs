@@ -14,6 +14,7 @@ process.env.YTUBE_RATE_LIMIT ??= "0";
 
 const VIDEO = process.env.VERIFY_VIDEO || "dQw4w9WgXcQ";
 const PLAYLIST = process.env.VERIFY_PLAYLIST || "PLBCF2DAC6FFB574DE";
+const CHANNEL = process.env.VERIFY_CHANNEL || "@mkbhd";
 const results = [];
 let failed = 0;
 
@@ -194,6 +195,35 @@ await check("playlist_pack", async () => {
   if (!batch?.videos?.length && !batch?.totalVideos) throw new Error("empty batch");
   return `packed=${batch.videos?.length} total=${batch.totalVideos} failures=${batch.failures?.length ?? 0}`;
 });
+
+await check("channel_catalog_videos", async () => {
+  const page = await yt.getChannelCatalog(CHANNEL, { contentType: "videos", limit: 3 });
+  if (page.items?.length !== 3 || page.items.some((item) => item.contentType !== "video")) {
+    throw new Error("bad long-form catalog page");
+  }
+  return `channel=${page.title} found=${page.discoveredVideos} hasMore=${page.hasMore}`;
+});
+
+await check("channel_catalog_shorts", async () => {
+  const page = await yt.getChannelCatalog(CHANNEL, { contentType: "shorts", limit: 3 });
+  if (page.items?.length !== 3 || page.items.some((item) => item.contentType !== "short")) {
+    throw new Error("bad Shorts catalog page");
+  }
+  return `channel=${page.title} found=${page.discoveredVideos} hasMore=${page.hasMore}`;
+});
+
+await check("channel_pack_analysis", async () => {
+  const page = await yt.getChannelPack(CHANNEL, {
+    contentType: "videos",
+    detail: "analysis",
+    limit: 1,
+  });
+  const item = page.videos?.[0];
+  if (!item?.video || !item.transcript?.segments?.length || !item.chapters || !item.chunks?.length) {
+    throw new Error("incomplete channel analysis item");
+  }
+  return `title=${item.title} segments=${item.transcript.segmentCount} chunks=${item.chunkCount}`;
+}, { optional: true });
 
 await check("related", async () => {
   const r = await yt.getRelated(VIDEO);

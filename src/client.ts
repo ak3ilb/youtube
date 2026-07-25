@@ -14,6 +14,8 @@ import { runEngine, type RunOptions } from "./go-bridge.js";
 
 export type SubtitleFormat = "srt" | "vtt" | "ass" | "json" | "text" | "chapters";
 export type CommentSort = "top" | "newest";
+export type ChannelContentType = "all" | "videos" | "shorts";
+export type BatchDetail = "summary" | "analysis";
 
 export interface YouTubeClientOptions extends RunOptions {
   /** Default caption language (e.g. "en" or preference chain "hi,en"). */
@@ -55,6 +57,26 @@ export interface BatchPackOptions extends PackOptions {
   cursor?: number;
   /** Embed full chunk text; omit for a cheap table of contents. */
   includeChunks?: boolean;
+  /** For channel sources, include both tabs, long-form videos, or Shorts. */
+  contentType?: ChannelContentType;
+  /** `analysis` embeds metadata, transcripts, chapters, and chunks. */
+  detail?: BatchDetail;
+}
+
+export interface ChannelCatalogOptions {
+  contentType?: ChannelContentType;
+  /** Catalog items returned in this call (default 50, max 200). */
+  limit?: number;
+  /** Resume index from a previous page's `nextCursor`. */
+  cursor?: number;
+  /** Start a fresh channel snapshot; only valid with cursor 0. */
+  refresh?: boolean;
+}
+
+export interface ChannelExportOptions extends PackOptions {
+  contentType?: ChannelContentType;
+  /** Resume a prior checkpointed export. */
+  jobId?: string;
 }
 
 export interface AskOptions {
@@ -107,9 +129,9 @@ export class YouTubeClient {
   }
 
   /**
-   * Pack every video in a playlist, a channel's recent uploads, or an explicit
-   * list. Videos that fail (captions disabled, private, …) are reported in
-   * `failures` instead of aborting the batch; follow `nextCursor` for the rest.
+   * Pack every video in a playlist, a creator's Videos/Shorts catalog, or an
+   * explicit list. Videos that fail (captions disabled, private, …) are
+   * reported in `failures`; follow `nextCursor` for the rest.
    */
   getBatchPack(source: string, opts?: BatchPackOptions) {
     return runEngine(
@@ -122,6 +144,8 @@ export class YouTubeClient {
         cursor: opts?.cursor,
         "include-chunks": opts?.includeChunks,
         "skip-sponsors": opts?.skipSponsors,
+        "content-type": opts?.contentType,
+        detail: opts?.detail,
       },
       this.opts({ timeoutMs: this.options.timeoutMs ?? 15 * 60 * 1000 }),
     );
@@ -135,6 +159,37 @@ export class YouTubeClient {
   /** `getBatchPack` for a channel URL, UC… ID, or @handle. */
   getChannelPack(channel: string, opts?: BatchPackOptions) {
     return this.getBatchPack(channel, opts);
+  }
+
+  /** Progressively list every long-form upload and Short from a creator channel. */
+  getChannelCatalog(channel: string, opts?: ChannelCatalogOptions) {
+    return runEngine(
+      "channelcatalog",
+      {
+        url: channel,
+        "content-type": opts?.contentType,
+        limit: opts?.limit,
+        cursor: opts?.cursor,
+        refresh: opts?.refresh,
+      },
+      this.opts(),
+    );
+  }
+
+  /** Export full channel analyses to a resumable local JSONL dataset. */
+  exportChannelAnalysis(channel: string, opts?: ChannelExportOptions) {
+    return runEngine(
+      "channelpackall",
+      {
+        url: channel,
+        lang: opts?.lang ?? this.options.lang,
+        "chunk-chars": opts?.chunkChars ?? 800,
+        "skip-sponsors": opts?.skipSponsors,
+        "content-type": opts?.contentType,
+        "job-id": opts?.jobId,
+      },
+      this.opts({ timeoutMs: this.options.timeoutMs ?? 15 * 60 * 1000 }),
+    );
   }
 
   /**

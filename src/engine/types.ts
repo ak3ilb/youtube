@@ -17,6 +17,7 @@ export type CommentSort = "top" | "newest";
 export type TranscriptSource = "manual" | "asr" | "translated" | "fallback" | (string & {});
 export type ChapterSource = "markers" | "description" | "none" | (string & {});
 export type BatchSourceKind = "playlist" | "channel" | "videos" | (string & {});
+export type BatchDetail = "summary" | "analysis";
 export type SearchResultKind = "video" | "channel" | "playlist" | (string & {});
 
 export interface Thumbnail {
@@ -218,15 +219,25 @@ export interface BatchItem {
   title: string;
   url: string;
   durationSeconds: number;
+  /** Channel-tab provenance when the source is a creator channel. */
+  contentType?: ChannelItemContentType;
   language?: string;
   chunkCount: number;
   chunks?: RAGChunk[];
+  /** Present when `detail: "analysis"` is requested. */
+  video?: VideoInfo;
+  /** Present when `detail: "analysis"` is requested. */
+  transcript?: Transcript;
+  /** Present when `detail: "analysis"` is requested. */
+  chapters?: Chapter[];
+  chapterSource?: string;
   cacheHit?: boolean;
 }
 
 export interface BatchFailure {
   videoId: string;
   title?: string;
+  contentType?: ChannelItemContentType;
   code: string;
   message: string;
   retryable: boolean;
@@ -237,6 +248,11 @@ export interface BatchPack {
   sourceId?: string;
   title?: string;
   totalVideos: number;
+  /** False means `totalVideos` is the count discovered so far, not the final total. */
+  catalogComplete?: boolean;
+  discoveredVideos?: number;
+  videoCount?: number;
+  shortCount?: number;
   cursor: number;
   nextCursor?: number;
   hasMore: boolean;
@@ -298,6 +314,91 @@ export interface ChannelResult {
   subscribers: string;
   videos: ChannelVideo[];
   count: number;
+}
+
+/** Provenance of a catalog entry: which channel tab produced it. */
+export type ChannelItemContentType = "video" | "short";
+
+/** Filter controlling which channel tabs `discoverChannelCatalog` advances. */
+export type ChannelCatalogContentFilter = "all" | "videos" | "shorts" | (string & {});
+
+/** One discovered upload or Short from a creator channel. */
+export interface ChannelCatalogItem {
+  id: string;
+  title: string;
+  contentType: ChannelItemContentType;
+  lengthText?: string;
+}
+
+/** Progressive Videos/Shorts discovery result for a creator channel. */
+export interface ChannelCatalog {
+  id: string;
+  handle: string;
+  title: string;
+  description: string;
+  subscribers: string;
+  items: ChannelCatalogItem[];
+  count: number;
+  videoCount: number;
+  shortCount: number;
+  /** True when every requested tab has been exhausted (or was unavailable). */
+  complete: boolean;
+}
+
+/** Bounded page over a progressively discovered creator catalog. */
+export interface ChannelCatalogPage extends Omit<ChannelCatalog, "items"> {
+  items: ChannelCatalogItem[];
+  cursor: number;
+  nextCursor?: number;
+  hasMore: boolean;
+  discoveredVideos: number;
+}
+
+/** Options for progressive / exhaustive channel catalog discovery. */
+export interface ChannelCatalogOptions {
+  /** Which tabs to include; defaults to `"all"`. */
+  contentType?: ChannelCatalogContentFilter;
+  /**
+   * Minimum items to discover before returning. `0` (default) means follow
+   * continuations until every requested tab is complete.
+   */
+  ensure?: number;
+  /** Start a new snapshot. Invalidates cursors from the previous snapshot. */
+  refresh?: boolean;
+}
+
+export interface ChannelCatalogPageOptions {
+  contentType?: ChannelCatalogContentFilter;
+  limit?: number;
+  cursor?: number;
+  refresh?: boolean;
+}
+
+export type ChannelExportStatus = "running" | "paused" | "completed";
+
+/** Options for a checkpointed full-channel JSONL analysis export. */
+export interface ChannelExportOptions extends PackOptions {
+  contentType?: ChannelCatalogContentFilter;
+  /** Resume a prior deterministic export. Usually copied from a previous result. */
+  jobId?: string;
+}
+
+/** Summary returned by the checkpointed channel export operation. */
+export interface ChannelExportResult {
+  jobId: string;
+  channelId: string;
+  title: string;
+  status: ChannelExportStatus;
+  dataPath: string;
+  checkpointPath: string;
+  catalogVideos: number;
+  cursor: number;
+  nextCursor?: number;
+  succeeded: number;
+  failed: number;
+  processedVideos: number;
+  processedShorts: number;
+  lastError?: BatchFailure;
 }
 
 export interface SearchResult {
@@ -478,6 +579,10 @@ export interface BatchOptions extends PackOptions {
   cursor?: number;
   /** Embed full chunk text; disable for a cheap table of contents. */
   includeChunks?: boolean;
+  /** For channel sources, select both tabs, long-form videos, or Shorts. */
+  contentType?: ChannelCatalogContentFilter;
+  /** `analysis` embeds metadata, transcript, chapters, and RAG chunks. */
+  detail?: BatchDetail;
 }
 
 export interface AskOptions {

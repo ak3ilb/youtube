@@ -16,6 +16,8 @@ import { Engine, createEngine } from "./transcript.js";
 import type {
   AskResult,
   BatchPack,
+  ChannelCatalogPage,
+  ChannelExportResult,
   ChaptersResult,
   CommentsResult,
   DownloadResult,
@@ -44,6 +46,8 @@ export { Engine, createEngine } from "./transcript.js";
 export * from "./ask.js";
 export * from "./batch.js";
 export * from "./cache.js";
+export * from "./channel-catalog.js";
+export * from "./channel-export.js";
 export * from "./chapters.js";
 export * from "./comments.js";
 export * from "./cookies.js";
@@ -122,6 +126,8 @@ export const COMMANDS = [
   "manifests",
   "playlist",
   "channel",
+  "channelcatalog",
+  "channelpackall",
   "search",
   "videopack",
   "packbatch",
@@ -151,6 +157,8 @@ const NEEDS_URL: ReadonlySet<string> = new Set([
   "manifests",
   "playlist",
   "channel",
+  "channelcatalog",
+  "channelpackall",
   "videopack",
   "ask",
   "sponsors",
@@ -193,6 +201,8 @@ export interface DispatchResults {
   manifests: ManifestsResult;
   playlist: PlaylistResult;
   channel: ChannelPreferResult;
+  channelcatalog: ChannelCatalogPage;
+  channelpackall: ChannelExportResult;
   search: SearchPreferResult;
   videopack: VideoPack;
   packbatch: BatchPack;
@@ -476,6 +486,31 @@ export async function dispatch(
     case "channel":
       return engine.channelPreferAPI(url, limit, signal);
 
+    case "channelcatalog":
+      return engine.channelCatalog(
+        url,
+        {
+          contentType: flagString(flags, "content-type", "all"),
+          limit,
+          cursor: intCursor(flags["cursor"]),
+          refresh: flagBool(flags, "refresh"),
+        },
+        signal,
+      );
+
+    case "channelpackall":
+      return engine.exportChannelAnalysis(
+        url,
+        {
+          lang,
+          chunkChars: flagInt(flags, "chunk-chars", 800),
+          skipSponsors: flagBool(flags, "skip-sponsors"),
+          contentType: flagString(flags, "content-type", "all"),
+          jobId: flagString(flags, "job-id") || undefined,
+        },
+        signal,
+      );
+
     case "search": {
       const query = requireFlag(flags, "query", "search");
       return engine.searchPreferAPI(query, limit, signal);
@@ -502,6 +537,8 @@ export async function dispatch(
           cursor: intCursor(flags["cursor"]),
           includeChunks: flagBool(flags, "include-chunks"),
           skipSponsors: flagBool(flags, "skip-sponsors"),
+          contentType: flagString(flags, "content-type", "all"),
+          detail: flagString(flags, "detail") === "analysis" ? "analysis" : "summary",
         },
         signal,
       );
