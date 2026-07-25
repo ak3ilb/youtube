@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * YouTube Client — a standalone MCP server for YouTube operations,
- * backed by a native Go extraction engine (no yt-dlp, no Python).
+ * YouTube Client — a standalone MCP server for YouTube operations.
+ * Pure Node.js / TypeScript engine (no Go, no yt-dlp, no Python).
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -9,7 +9,7 @@ import { z } from "zod";
 
 import { runEngine, YtubeError } from "./go-bridge.js";
 
-const server = new McpServer({ name: "YouTube Client", version: "1.1.0" });
+const server = new McpServer({ name: "YouTube Client", version: "2.0.0" });
 
 const urlOrId = z
   .string()
@@ -62,10 +62,13 @@ server.registerTool(
   {
     title: "Get transcript with timestamps",
     description:
-      "Download the transcript with timestamps. Auto-generated captions are sentence-merged by default (YouTube ASR chops mid-phrase into 2–4s cues; merging restores readable continuous text covering the whole video). Each segment includes start/end and [M:SS] timestamps. Set maxChars to page through very long videos: the response returns nextCursor and hasMore, and you pass nextCursor back as cursor. Optional lang; if missing, tries YouTube auto-translate.",
+      "Download the transcript with timestamps. Works for Shorts and long videos. Auto-generated captions are sentence-merged by default. lang accepts a preference chain like 'hi,en' (best-effort by default; set strict=true to hard-fail). Falls back through ANDROID/IOS caption clients, retries empty bodies, and serves a stale cache copy if YouTube is temporarily unreachable. Set maxChars to page long videos via nextCursor. Optional words, translateTo, stripSoundTags, groupByChapters.",
     inputSchema: {
       urlOrId,
-      lang,
+      lang: z
+        .string()
+        .optional()
+        .describe("Language code or comma preference chain, e.g. 'en' or 'hi,en'"),
       merge: z
         .boolean()
         .optional()
@@ -83,9 +86,29 @@ server.registerTool(
         .nonnegative()
         .optional()
         .describe("Segment index to resume from (use nextCursor from the previous page)"),
+      strict: z
+        .boolean()
+        .optional()
+        .describe("Hard-fail when the requested language is missing (default: best-effort fallback)"),
+      words: z
+        .boolean()
+        .optional()
+        .describe("Include word-level timings from json3 captions"),
+      translateTo: z
+        .string()
+        .optional()
+        .describe("Force YouTube auto-translate to this language code"),
+      stripSoundTags: z
+        .boolean()
+        .optional()
+        .describe("Drop [Music]/[Applause] style sound-tag cues"),
+      groupByChapters: z
+        .boolean()
+        .optional()
+        .describe("Attach chapter-bucketed transcript sections with jump URLs"),
     },
   },
-  async ({ urlOrId, lang, merge, maxChars, cursor }) =>
+  async ({ urlOrId, lang, merge, maxChars, cursor, strict, words, translateTo, stripSoundTags, groupByChapters }) =>
     handle(() =>
       runEngine("transcript", {
         url: urlOrId,
@@ -93,6 +116,11 @@ server.registerTool(
         merge: merge === undefined ? undefined : merge ? "true" : "false",
         "max-chars": maxChars,
         cursor,
+        strict,
+        words,
+        "translate-to": translateTo,
+        "strip-sound-tags": stripSoundTags,
+        "group-chapters": groupByChapters,
       }),
     ),
 );
@@ -359,6 +387,20 @@ server.registerTool(
     inputSchema: { urlOrId },
   },
   async ({ urlOrId }) => handle(() => runEngine("sponsors", { url: urlOrId })),
+);
+
+server.registerTool(
+  "diagnose_transcript",
+  {
+    title: "Diagnose transcript extraction",
+    description:
+      "Run the caption resolution ladder and report each stage: InnerTube client playability, track counts, selected language/source, caption body bytes/format, cache hit/stale availability, and remaining rate budget. Use when get_transcript fails or returns empty.",
+    inputSchema: {
+      urlOrId,
+      lang: z.string().optional().describe("Language preference chain to evaluate, e.g. 'hi,en'"),
+    },
+  },
+  async ({ urlOrId, lang }) => handle(() => runEngine("diagnose", { url: urlOrId, lang })),
 );
 
 server.registerTool(

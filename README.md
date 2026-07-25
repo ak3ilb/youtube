@@ -2,7 +2,7 @@
 
 Node.js library and [MCP](https://modelcontextprotocol.io) server for YouTube analysis: transcripts with citations, RAG packs, chapters, captions, search, playlists, and channels.
 
-Powered by a native Go extraction engine. No yt-dlp. No Python.
+Pure TypeScript / Node.js engine. No Go. No yt-dlp. No Python.
 
 ```bash
 npm install youtube-client-mcp
@@ -19,6 +19,10 @@ const pack = await yt.getVideoPack("https://www.youtube.com/watch?v=jNQXAC9IVRw"
 
 ## Features
 
+- Reliable transcripts for Shorts and long videos — multi-client fallback (ANDROID → IOS → WEB), caption retry ladder, stable disk cache, stale-cache rescue
+- Language preference chains (`hi,en`) with best-effort fallback; `strict` opt-in for hard fails
+- Word-level timings, chapter-grouped transcripts, sound-tag stripping, forced `translateTo`
+- `diagnoseTranscript` — see exactly which ladder stage failed
 - Transcripts with `[M:SS]` citations and jump links; ASR cues sentence-merged by default
 - `getVideoPack` — metadata, chapters, and RAG-ready chunks in one call
 - `askVideo` — answer a question from the best passages instead of the whole transcript
@@ -27,7 +31,7 @@ const pack = await yt.getVideoPack("https://www.youtube.com/watch?v=jNQXAC9IVRw"
 - Chapters, captions, related videos, comments (sort, replies, paging), playlists, channels, search
 - Local disk cache and hourly rate budget
 - Same API as a TypeScript library or MCP tools (Cursor / Claude)
-- Cross-platform Go binaries included in the npm package
+- Pure Node.js — `npm install` is the only dependency for users and contributors
 
 ---
 
@@ -46,7 +50,7 @@ is shipped in the published version.
 | Chapters, comments, related, heatmap | [Built in](#api) | Limited | Metadata and comments cost quota | Extraction-oriented | Varies |
 | API key required | No | Usually no | Yes | No | Yes |
 | Local cache and rate budget | [Built in](#configuration) | Varies | Developer-managed | Developer-managed | Provider-managed |
-| Runtime | Go binaries + TypeScript | Often Python / yt-dlp | SDK | Python executable | Remote service |
+| Runtime | Pure Node.js / TypeScript | Often Python / yt-dlp | SDK | Python executable | Remote service |
 | High-quality media download | Limited today | No | No | Best-in-class | No |
 
 Where other tools are the better choice:
@@ -72,7 +76,9 @@ ffmpeg muxing, and no live-fragment downloads. See [Limitations](#limitations).
 npm install youtube-client-mcp
 ```
 
-Requires Node.js 20+. Prebuilt `ytube` binaries ship for macOS, Linux, and Windows. From a git checkout, run `npm run build` (Go toolchain required once).
+**That is the only install step.** You need Node.js 20+. You do **not** need Go, Python, yt-dlp, ffmpeg, or any native toolchain.
+
+From a git checkout: `npm install && npm run build` (TypeScript only).
 
 ---
 
@@ -119,10 +125,11 @@ const info = await youtube.getVideoInfo("jNQXAC9IVRw");
 | `getPlaylistPack(url, opts?)` | Batch packs for a playlist, resumable via `nextCursor` |
 | `getChannelPack(url, opts?)` | Batch packs for a channel's recent uploads |
 | `getVideoInfo(url)` | Title, channel, duration, views, likes, category, publish date, thumbnails |
-| `getTranscript(url, opts?)` | Transcript with timestamps; optional `maxChars` / `cursor` paging |
+| `getTranscript(url, opts?)` | Reliable transcript (Shorts + long); lang chains, paging, words, chapters |
+| `diagnoseTranscript(url, opts?)` | Caption ladder diagnostics (clients, tracks, body, cache, budget) |
 | `getTranscriptClip(url, start, opts?)` | Transcript for a time range |
 | `searchTranscript(url, query, opts?)` | Keyword hits with timestamps |
-| `exportSubtitles(url, opts?)` | Export as `srt` / `vtt` / `ass` / `json` / `text` |
+| `exportSubtitles(url, opts?)` | Export as `srt` / `vtt` / `ass` / `json` / `text` / `chapters` |
 | `listCaptions(url)` | Available caption tracks |
 | `getChapters(url)` | Chapter markers |
 | `getThumbnails(url)` | Thumbnail URLs |
@@ -185,6 +192,32 @@ for (;;) {
   cursor = page.nextCursor;
 }
 ```
+
+### Reliable transcripts (Shorts and long videos)
+
+```ts
+// Preference chain: try Hindi, then English. Best-effort by default.
+const tr = await client.getTranscript(url, {
+  lang: "hi,en",
+  words: true,            // word-level timings when json3 provides them
+  stripSoundTags: true,   // drop [Music] / [Applause]
+  groupByChapters: true,  // bucket segments under chapter markers
+});
+
+console.log(tr.source, tr.resolvedLang, tr.warnings);
+
+// Hard-fail if the exact language is missing:
+await client.getTranscript(url, { lang: "fr", strict: true });
+
+// See why a video failed:
+const diag = await client.diagnoseTranscript(url, { lang: "en" });
+console.log(diag.ok, diag.clients, diag.formatUsed, diag.rateBudgetRemaining);
+```
+
+Transcript calls use a stable disk cache (signed caption URLs are never part of
+the key), escalate across ANDROID → IOS → WEB caption clients, retry empty
+bodies with fresh signatures / optional `YTUBE_PO_TOKEN`, and serve a stale
+cached copy when YouTube is temporarily unreachable.
 
 ### Batch a playlist or channel
 
@@ -283,14 +316,18 @@ Example prompt:
 | Variable | Description |
 | --- | --- |
 | `YTUBE_CACHE_DIR` | Disk cache directory (default `~/.cache/youtube-client`) |
-| `YTUBE_CACHE_TTL` | Cache lifetime (default `30m`) |
+| `YTUBE_CACHE_TTL` | Fresh cache lifetime (default `6h`) |
+| `YTUBE_CACHE_MAX_STALE` | Max age for stale-cache rescue on retryable failures (default `168h`) |
 | `YTUBE_CACHE` | Set `0` to disable cache |
+| `YTUBE_TIMEDTEXT_COOLDOWN` | After a caption HTTP 429, skip live timedtext for this long and prefer stale cache (default `15m`; `0` disables) |
 | `YTUBE_RATE_LIMIT` | Max billable YouTube calls per hour (default `60`; `0` disables) |
 | `YTUBE_COOKIES` | Path to Netscape `cookies.txt` for age-gated videos you can access |
 | `YOUTUBE_API_KEY` | Optional [YouTube Data API v3](https://developers.google.com/youtube/v3) key for more stable search/channel |
 | `YTUBE_RICH_METADATA` | Set `0` to skip the extra request that fills category, likes, and publish date |
-| `YTUBE_PO_TOKEN` | PO token from your own browser session, forwarded to the player request |
+| `YTUBE_PO_TOKEN` | PO token from your own browser session (player + caption URLs) |
 | `YTUBE_VISITOR_DATA` | Visitor data to pair with your PO token |
+| `YTUBE_HL` / `YTUBE_GL` | Interface language / country for InnerTube (default `en` / `US`) |
+| `YTUBE_DEBUG` | Set `1` to attach caption attempt logs on transcript responses |
 | `YTUBE_SPONSORBLOCK` | Set `1` to enable [SponsorBlock](https://sponsor.ajay.app) lookups (off by default) |
 | `YTUBE_SPONSORBLOCK_CATEGORIES` | Comma-separated categories (default sponsor, selfpromo, interaction, intro, outro, preview, music_offtopic) |
 
@@ -311,29 +348,13 @@ Your app / Cursor / Claude
         └─ stdio MCP                (agents)
                 │
                 ▼
-        TypeScript package
-                │
-                ▼
-        Go engine (ytube)
+        Pure TypeScript package (src/engine)
           · InnerTube player / next / browse / search / resolve_url
           · timedtext captions (json3, srv1, srv3)
           · chunking, BM25 passage ranking, batch packs
           · disk cache + rate budget
           · optional Data API v3, optional SponsorBlock
 ```
-
-### Go CLI (optional)
-
-```bash
-./bin/ytube-darwin-arm64 videopack --url jNQXAC9IVRw --chunk-chars 800
-./bin/ytube-darwin-arm64 transcript --url jNQXAC9IVRw --max-chars 8000 --cursor 0
-./bin/ytube-darwin-arm64 ask --url jNQXAC9IVRw --query "what about the elephants?" --top-k 3
-./bin/ytube-darwin-arm64 packbatch --url "PL…" --limit 5 --cursor 0 --include-chunks
-./bin/ytube-darwin-arm64 comments --url jNQXAC9IVRw --sort newest --replies 2
-./bin/ytube-darwin-arm64 search --query "me at the zoo" --limit 5
-```
-
-Each invocation prints one JSON object: `{ "ok": true, "data": ... }` or `{ "ok": false, "error": { ... } }`.
 
 ---
 

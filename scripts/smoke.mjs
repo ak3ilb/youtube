@@ -36,7 +36,7 @@ async function call(tool, args) {
 
 try {
   const { tools } = await client.listTools();
-  record("list_tools", tools.length >= 23, `count=${tools.length}`);
+  record("list_tools", tools.length >= 24, `count=${tools.length}`);
 
   let r = await call("get_video_info", { urlOrId: `https://www.youtube.com/watch?v=${VIDEO}` });
   record("get_video_info", !r.isError && r.body.title === "Me at the zoo", r.body.title);
@@ -46,7 +46,38 @@ try {
   record(
     "get_transcript_timestamps",
     !r.isError && seg0?.timestamp && Array.isArray(r.body.lines) && r.body.lines[0]?.startsWith("["),
-    `ts=${seg0?.timestamp} lines=${r.body.lines?.length}`,
+    `ts=${seg0?.timestamp} lines=${r.body.lines?.length} source=${r.body.source}`,
+  );
+
+  // Second call must hit the stable transcript cache (same key, no signed URL).
+  r = await call("get_transcript", { urlOrId: VIDEO, lang: "en" });
+  record(
+    "get_transcript_cache",
+    !r.isError && r.body.segmentCount >= 1 && r.body.stale !== true,
+    `segs=${r.body.segmentCount} source=${r.body.source}`,
+  );
+
+  r = await call("get_transcript", { urlOrId: VIDEO, lang: "xx,en" });
+  record(
+    "get_transcript_lang_chain",
+    !r.isError && (r.body.resolvedLang === "en" || r.body.languageCode?.startsWith("en") || ["fallback", "translated", "manual", "asr"].includes(r.body.source)),
+    `resolved=${r.body.resolvedLang} source=${r.body.source} warnings=${r.body.warnings?.length ?? 0}`,
+  );
+
+  // words=true uses a separate captions cache key; skip if prior transcript failed (rate limit).
+  if (!results.find((x) => x.name === "get_transcript_timestamps")?.passed) {
+    record("get_transcript_words", false, "skipped: base transcript failed");
+  } else {
+    r = await call("get_transcript", { urlOrId: VIDEO, lang: "en", words: true });
+    const hasWords = (r.body.segments ?? []).some((s) => Array.isArray(s.words) && s.words.length > 0);
+    record("get_transcript_words", !r.isError && (hasWords || r.body.segmentCount >= 1), `hasWords=${hasWords}`);
+  }
+
+  r = await call("diagnose_transcript", { urlOrId: VIDEO, lang: "en" });
+  record(
+    "diagnose_transcript",
+    !r.isError && r.body.videoId === VIDEO && (r.body.ok === true || Array.isArray(r.body.clients)),
+    `ok=${r.body.ok} cacheHit=${r.body.cacheHit} clients=${r.body.clients?.length} format=${r.body.formatUsed}`,
   );
 
   r = await call("get_transcript", { urlOrId: VIDEO, lang: "en", maxChars: 40 });
@@ -150,9 +181,9 @@ try {
   r = await call("get_video_info", { urlOrId: "https://vimeo.com/12345" });
   record("error: invalid URL", r.isError && r.body.error === "INVALID_VIDEO", r.body.error);
 
-  r = await call("get_transcript", { urlOrId: VIDEO, lang: "xx" });
+  r = await call("get_transcript", { urlOrId: VIDEO, lang: "xx", strict: true });
   record(
-    "error: missing language",
+    "error: missing language strict",
     r.isError && ["LANGUAGE_NOT_AVAILABLE", "TRANSLATION_UNAVAILABLE", "RATE_LIMITED", "EMPTY_TRANSCRIPT", "YOUTUBE_HTTP_ERROR", "RATE_BUDGET_EXCEEDED"].includes(r.body.error),
     r.body.error,
   );

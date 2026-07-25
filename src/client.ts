@@ -8,18 +8,20 @@
  */
 export { runEngine, resolveEngine, YtubeError } from "./go-bridge.js";
 export type { EngineError, RunOptions } from "./go-bridge.js";
+export { createEngine, Engine, dispatch } from "./engine/index.js";
 
 import { runEngine, type RunOptions } from "./go-bridge.js";
 
-export type SubtitleFormat = "srt" | "vtt" | "ass" | "json" | "text";
+export type SubtitleFormat = "srt" | "vtt" | "ass" | "json" | "text" | "chapters";
 export type CommentSort = "top" | "newest";
 
 export interface YouTubeClientOptions extends RunOptions {
-  /** Default caption language (e.g. "en"). */
+  /** Default caption language (e.g. "en" or preference chain "hi,en"). */
   lang?: string;
 }
 
 export interface TranscriptOptions {
+  /** Language code or comma preference chain, e.g. "hi,en". */
   lang?: string;
   /** Merge mid-phrase ASR cues into sentences (default true for auto captions). */
   merge?: boolean;
@@ -27,6 +29,16 @@ export interface TranscriptOptions {
   cursor?: number;
   /** Characters per page; omit to return the whole transcript at once. */
   maxChars?: number;
+  /** Hard-fail when the requested language is missing (default: best-effort). */
+  strict?: boolean;
+  /** Include word-level timings from json3 captions. */
+  words?: boolean;
+  /** Force YouTube auto-translate to this language. */
+  translateTo?: string;
+  /** Drop [Music] / [Applause] style sound-tag cues. */
+  stripSoundTags?: boolean;
+  /** Attach chapter-bucketed transcript sections. */
+  groupByChapters?: boolean;
 }
 
 export interface PackOptions {
@@ -62,7 +74,7 @@ export interface CommentsOptions {
 }
 
 /**
- * High-level TypeScript wrapper around the native Go `ytube` engine.
+ * High-level TypeScript wrapper around the pure Node.js extraction engine.
  * Same capabilities as the MCP tools, usable from any Node 20+ script.
  */
 export class YouTubeClient {
@@ -161,7 +173,24 @@ export class YouTubeClient {
         merge: merge === undefined ? undefined : merge ? "true" : "false",
         cursor: opts?.cursor,
         "max-chars": opts?.maxChars,
+        strict: opts?.strict,
+        words: opts?.words,
+        "translate-to": opts?.translateTo,
+        "strip-sound-tags": opts?.stripSoundTags,
+        "group-chapters": opts?.groupByChapters,
       },
+      this.opts(),
+    );
+  }
+
+  /**
+   * Run the caption resolution ladder and report each stage (clients, tracks,
+   * body bytes, cache, rate budget). Use when a transcript call fails.
+   */
+  diagnoseTranscript(urlOrId: string, opts?: { lang?: string }) {
+    return runEngine(
+      "diagnose",
+      { url: urlOrId, lang: opts?.lang ?? this.options.lang },
       this.opts(),
     );
   }

@@ -1,7 +1,7 @@
 {
   "name": "youtube-client-mcp",
-  "version": "1.1.0",
-  "description": "YouTube Client — Node library and MCP server for transcripts, RAG citation packs, video Q&A, playlist/channel batches, chapters, captions, and search. Native Go engine. No yt-dlp. No Python.",
+  "version": "2.0.0",
+  "description": "YouTube Client — pure Node.js library and MCP server for reliable transcripts (Shorts + long videos), RAG citation packs, video Q&A, playlist/channel batches, chapters, captions, and search. No Go. No yt-dlp. No Python.",
   "type": "module",
   "main": "./dist/client.js",
   "types": "./dist/client.d.ts",
@@ -23,20 +23,18 @@
   },
   "files": [
     "dist",
-    "bin",
     "docs",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "clean": "rm -rf dist bin",
+    "clean": "rm -rf dist",
+    "build": "tsc -p tsconfig.json",
     "build:ts": "tsc -p tsconfig.json",
-    "build:go": "node scripts/build-go.mjs",
-    "build": "npm run build:ts && npm run build:go",
-    "test:go": "go test ./...",
-    "test": "npm run build:ts && npm run test:go",
+    "test:unit": "tsx --test src/engine/engine.test.ts",
+    "test": "npm run build && npm run test:unit",
     "smoke": "node scripts/smoke.mjs",
-    "prepublishOnly": "npm test && npm run build:go"
+    "prepublishOnly": "npm test"
   },
   "keywords": [
     "youtube-client",
@@ -62,7 +60,6 @@
     "llm",
     "typescript",
     "nodejs",
-    "golang",
     "yt-dlp-alternative",
     "youtube-api",
     "video-analysis"
@@ -86,6 +83,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
+    "tsx": "^4.20.3",
     "typescript": "^7.0.2"
   }
 }
