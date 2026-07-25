@@ -749,6 +749,20 @@ export function appendUniqueUrl(list: string[], u: string): string[] {
   return [...list, u];
 }
 
+function annotateStale(
+  stale: { value: Transcript; ageSeconds: number },
+  reason: string,
+): Transcript {
+  const transcript = { ...stale.value };
+  transcript.stale = true;
+  transcript.staleAgeSeconds = stale.ageSeconds;
+  transcript.warnings = [
+    ...(transcript.warnings ?? []),
+    `Served stale transcript (${stale.ageSeconds}s old) — ${reason}`,
+  ];
+  return transcript;
+}
+
 export function transcriptCacheKey(id: string, opts: TranscriptOptions): string {
   const merge = opts.merge === undefined ? "auto" : String(opts.merge);
   return [
@@ -1144,14 +1158,18 @@ export class Engine {
     if (isTimedtextCoolingDown()) {
       const stale = await this.client.cache.getStale<Transcript>("transcript", cacheKey);
       if (stale !== undefined) {
-        const transcript = stale.value;
-        transcript.stale = true;
-        transcript.staleAgeSeconds = stale.ageSeconds;
-        transcript.warnings = [
-          ...(transcript.warnings ?? []),
-          `Served stale transcript (${stale.ageSeconds}s old) — timedtext cooldown after HTTP 429`,
-        ];
-        return transcript;
+        return annotateStale(stale, "timedtext cooldown after HTTP 429");
+      }
+      // Best-effort: any cached language for this video (lang-chain / alt opts).
+      for (const altLang of [...parseLangChain(opts.lang), "", "en"]) {
+        const altKey = transcriptCacheKey(id, { ...opts, lang: altLang || undefined });
+        if (altKey === cacheKey) continue;
+        const alt = await this.client.cache.getStale<Transcript>("transcript", altKey);
+        if (alt !== undefined) {
+          const tr = annotateStale(alt, `timedtext cooldown; served cached lang "${alt.value.languageCode}"`);
+          tr.requestedLang = opts.lang || tr.requestedLang;
+          return tr;
+        }
       }
     }
 
@@ -1162,14 +1180,17 @@ export class Engine {
       if (isRetryableExtract(fetchErr)) {
         const stale = await this.client.cache.getStale<Transcript>("transcript", cacheKey);
         if (stale !== undefined) {
-          const transcript = stale.value;
-          transcript.stale = true;
-          transcript.staleAgeSeconds = stale.ageSeconds;
-          transcript.warnings = [
-            ...(transcript.warnings ?? []),
-            `Served stale transcript (${stale.ageSeconds}s old) after live fetch failed: ${errorText(fetchErr)}`,
-          ];
-          return transcript;
+          return annotateStale(stale, `live fetch failed: ${errorText(fetchErr)}`);
+        }
+        for (const altLang of [...parseLangChain(opts.lang), "", "en"]) {
+          const altKey = transcriptCacheKey(id, { ...opts, lang: altLang || undefined });
+          if (altKey === cacheKey) continue;
+          const alt = await this.client.cache.getStale<Transcript>("transcript", altKey);
+          if (alt !== undefined) {
+            const tr = annotateStale(alt, `live fetch failed; served cached lang "${alt.value.languageCode}"`);
+            tr.requestedLang = opts.lang || tr.requestedLang;
+            return tr;
+          }
         }
       }
       throw fetchErr;
