@@ -11,14 +11,6 @@
       <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.24"/>
       <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0"/>
     </linearGradient>
-    <style>
-      .ytc-word { fill: #0E1116; }
-      .ytc-tag  { fill: #5B6472; }
-      @media (prefers-color-scheme: dark) {
-        .ytc-word { fill: #F2F4F8; }
-        .ytc-tag  { fill: #9AA4B2; }
-      }
-    </style>
   </defs>
 
   <g transform="translate(16 16) scale(0.5625)">
@@ -34,7 +26,7 @@
   </g>
 
   <g font-family="system-ui, -apple-system, 'Segoe UI', Inter, Roboto, 'Helvetica Neue', Arial, sans-serif">
-    <text class="ytc-word" x="324" y="166" font-size="88" font-weight="700" letter-spacing="-2.5">YouTube Client</text>
-    <text class="ytc-tag" x="326" y="226" font-size="33" font-weight="500">Transcripts &#183; RAG &#183; MCP &#183; Pure Node.js</text>
+    <text fill="#0E1116" x="324" y="166" font-size="88" font-weight="700" letter-spacing="-2.5">YouTube Client</text>
+    <text fill="#5B6472" x="326" y="226" font-size="33" font-weight="500">Transcripts &#183; RAG &#183; MCP &#183; Pure Node.js</text>
   </g>
 </svg>

@@ -115,7 +115,9 @@ From a git checkout: `npm install && npm run build` (TypeScript only).
 
 Importing the package does **not** start the MCP server.
 
-![Library usage — getVideoPack in TypeScript](docs/library-usage.jpg)
+<p align="center">
+  <img src="docs/library-usage.jpg" alt="Library usage — getVideoPack in TypeScript" width="800" style="border-radius: 8px; border: 1px solid #8b949e;">
+</p>
 
 ```ts
 import { YouTubeClient, YtubeError, youtube } from "youtube-client-mcp";
@@ -437,7 +439,9 @@ including `get_video_pack`, `ask_video`, `get_playlist_pack`, `get_channel_pack`
 `get_channel_catalog`, `export_channel_analysis`, `get_transcript` (with
 `maxChars` / `cursor` paging), and `get_comments`.
 
-![MCP usage — YouTube Client tools in an agent chat](docs/mcp-usage.jpg)
+<p align="center">
+  <img src="docs/mcp-usage.jpg" alt="MCP usage — YouTube Client tools in an agent chat" width="800" style="border-radius: 8px; border: 1px solid #8b949e;">
+</p>
 
 ### Cursor
 
