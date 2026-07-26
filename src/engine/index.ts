@@ -323,6 +323,7 @@ function transcriptOptions(flags: DispatchFlags): TranscriptOptions {
     translateTo: flagString(flags, "translate-to") || undefined,
     stripSoundTags: flagBool(flags, "strip-sound-tags"),
     groupByChapters: flagBool(flags, "group-chapters"),
+    browser: flagBool(flags, "browser"),
   };
 }
 

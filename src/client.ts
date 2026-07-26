@@ -9,6 +9,14 @@
 export { runEngine, resolveEngine, YtubeError } from "./go-bridge.js";
 export type { EngineError, RunOptions } from "./go-bridge.js";
 export { createEngine, Engine, dispatch } from "./engine/index.js";
+export {
+  closeBrowser,
+  getBrowserJobStats,
+  isBrowserTranscriptAvailable,
+  releaseBrowserIfEnabled,
+  resetBrowserJobStats,
+} from "./engine/browser-transcript.js";
+export type { BrowserJobStats } from "./engine/browser-transcript.js";
 
 import { runEngine, type RunOptions } from "./go-bridge.js";
 
@@ -41,6 +49,11 @@ export interface TranscriptOptions {
   stripSoundTags?: boolean;
   /** Attach chapter-bucketed transcript sections. */
   groupByChapters?: boolean;
+  /**
+   * Fetch captions through a headless browser when timedtext is IP-blocked.
+   * Needs the optional `playwright` peer dependency; also set by `YTUBE_BROWSER=1`.
+   */
+  browser?: boolean;
 }
 
 export interface PackOptions {
@@ -51,7 +64,7 @@ export interface PackOptions {
 }
 
 export interface BatchPackOptions extends PackOptions {
-  /** Videos to process in this call (default 5, max 25). */
+  /** Videos to process in this call (default 5, max 50). */
   limit?: number;
   /** Resume index from a previous call's `nextCursor`. */
   cursor?: number;
@@ -233,6 +246,7 @@ export class YouTubeClient {
         "translate-to": opts?.translateTo,
         "strip-sound-tags": opts?.stripSoundTags,
         "group-chapters": opts?.groupByChapters,
+        browser: opts?.browser,
       },
       this.opts(),
     );

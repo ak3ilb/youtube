@@ -27,6 +27,7 @@ const pack = await yt.getVideoPack("https://www.youtube.com/watch?v=jNQXAC9IVRw"
 ## Features
 
 - Reliable transcripts for Shorts and long videos — multi-client fallback (ANDROID → IOS → WEB), caption retry ladder, stable disk cache, stale-cache rescue
+- Optional headless-browser fallback (`YTUBE_BROWSER=1`) that fetches captions same-origin when timedtext is IP-blocked
 - Language preference chains (`hi,en`) with best-effort fallback; `strict` opt-in for hard fails
 - Word-level timings, chapter-grouped transcripts, sound-tag stripping, forced `translateTo`
 - `diagnoseTranscript` — see exactly which ladder stage failed
@@ -92,6 +93,9 @@ fail. Competing libraries from the same IP fail the same way.
 3. Set a clean egress proxy: `YTUBE_PROXY=http://user:pass@host:port`
    (or `HTTPS_PROXY`). Residential egress works best; datacenter IPs are often
    blocked faster.
+4. Enable the [headless browser fallback](#advanced-transcripts-headless-browser-fallback)
+   (`YTUBE_BROWSER=1`) — it fetches captions the same way the watch page does,
+   from inside a real browser session.
 
 ---
 
@@ -246,12 +250,108 @@ the key), escalate across ANDROID → IOS → WEB caption clients, retry empty
 bodies with fresh signatures / optional `YTUBE_PO_TOKEN`, and serve a stale
 cached copy when YouTube is temporarily unreachable.
 
+### Advanced transcripts: headless browser fallback
+
+When Node's `/api/timedtext` GETs are IP-blocked (the HTTP 429 "Sorry..." page),
+a real browser session can still obtain captions. Verified in Cursor's browser
+on `dQw4w9WgXcQ`: same-origin timedtext still returned 429, but **Show
+transcript** loaded the full cue list. The optional Playwright fallback
+reproduces that flow headlessly:
+
+1. Open the watch page and read caption tracks from `ytInitialPlayerResponse`
+2. Try a same-origin timedtext fetch (`json3` → `srv1` → `srv3`)
+3. If that is blocked/empty, open **Show transcript** and scrape the panel cues
+
+**Resolution flow** (browser is the last live path — cache and the Node ladder run first):
+
+```mermaid
+flowchart TD
+  start[getTranscript] --> cache{fresh or stale cache?}
+  cache -->|hit| done[return Transcript]
+  cache -->|miss| ladder[InnerTube plus Node timedtext]
+  ladder -->|ok| done
+  ladder -->|IP_BLOCKED empty RATE_LIMITED| enabled{browser enabled?}
+  enabled -->|no| err[throw IP_BLOCKED plus enable YTUBE_BROWSER hint]
+  enabled -->|yes| nav[Headless Chromium open watch page]
+  nav --> ready[Wait ytInitialPlayerResponse videoId match]
+  ready --> tracks[Pick caption track via lang chain]
+  tracks --> same[Same-origin fetch fmt json3]
+  same -->|empty or blocked| fmt[Retry srv1 then srv3 in page]
+  fmt -->|still fail| panel[Show transcript click plus get_panel JSON]
+  same -->|segments| parse[Parse and cache Transcript]
+  fmt -->|segments| parse
+  panel -->|transcriptSegmentViewModel cues| parse
+  parse --> done
+```
+
+**Install** (optional — not pulled in by default):
+
+```bash
+npm i playwright
+npx playwright install chromium
+```
+
+**Enable** it per call or globally:
+
+```ts
+// Per call:
+const tr = await client.getTranscript(url, { lang: "en", browser: true });
+
+// Or globally for every transcript in the process:
+//   YTUBE_BROWSER=1
+```
+
+The result is cached like any transcript, so the browser only launches on the
+first miss; subsequent calls are served from disk. Successful browser-backed
+transcripts carry `browser_fallback` (and `browser_panel_fallback` when the
+Show transcript UI was used) in `warnings`.
+
+**Footprint:** the browser is **always headless** (no visible window). It runs a
+single shared Chromium with images/media/fonts blocked (stylesheets kept so the
+transcript panel can mount). For batches: **one watch tab at a time**, each tab
+is closed when that video finishes, leftover blank tabs are swept, and browser
+jobs are spaced by `YTUBE_BROWSER_GAP_MS` (default 750ms) so a 30-video pack does
+not hammer the watch/`get_panel` endpoints. Chromium stays warm between pack
+pages — agents usually walk a playlist with `nextCursor`, and relaunching per
+page costs more than the ~60s idle shutdown. A channel **export** closes it as
+soon as the slice completes or pauses; call `closeBrowser()` yourself to free RAM
+immediately. If both timedtext and the panel fail from your IP, set `YTUBE_PROXY`
+to a clean residential egress.
+
+**Large browser batches (20–30 videos):** a pack page takes up to 50 videos.
+Because every video that falls back to the browser costs ~5–15s, plan for
+multi-minute runs and raise or disable the request budget — `YTUBE_RATE_LIMIT=0`
+(or a few hundred) — otherwise the default budget of 60 aborts mid-batch. To
+verify the browser path at that scale on your own network:
+
+```bash
+npm i playwright && npx playwright install chromium
+VERIFY_LIMIT=30 npm run verify:browser-batch
+```
+
+The harness arms the timedtext breaker so every video goes through the browser,
+then checks success rate, that only one watch tab is ever open, that the job
+counter drains, and that Chromium tears down cleanly. Point it at your own
+source with `VERIFY_SOURCE` (playlist/channel) or `VERIFY_IDS`. A 30-video run
+from a fully timedtext-blocked IP packed 30 of 31 videos (the miss had no
+captions at all) in ~110s — median 4.2s per browser job, one tab throughout,
+peak RSS ~210MB.
+
+**Known limit:** on videos served YouTube's newer transcript panel, the panel
+request is rejected in headless Chromium (HTTP 400 "Precondition check failed")
+no matter how it is opened, so those videos fall back to `IP_BLOCKED` when
+timedtext is also blocked. Such videos are reported per video in `failures`
+rather than ending the batch, and a pack now tolerates a short streak of
+block-style failures before stopping — use `YTUBE_PROXY` for a clean egress when
+you hit them.
+
 ### Batch a playlist or creator channel
 
 Each video costs several YouTube requests, so batches process a small slice per
-call. Videos that cannot be packed (captions disabled, private, region-blocked)
-land in `failures` instead of failing the run, and already-packed videos come
-from cache for free when you resume.
+call — `limit` defaults to 5 and is capped at 50 per page. Videos that cannot be
+packed (captions disabled, private, region-blocked) land in `failures` instead of
+failing the run, and already-packed videos come from cache for free when you
+resume.
 
 ```ts
 let cursor = 0;
@@ -407,6 +507,8 @@ Example prompt:
 | `YTUBE_CACHE_MAX_STALE` | Max age for stale-cache rescue on retryable failures (default `168h`) |
 | `YTUBE_CACHE` | Set `0` to disable cache |
 | `YTUBE_PROXY` | HTTP(S) proxy for YouTube egress (`http://user:pass@host:port`). Also honors `HTTPS_PROXY` / `HTTP_PROXY`. Use this when timedtext returns **IP_BLOCKED** (429 Sorry page) |
+| `YTUBE_BROWSER` | Set `1` to enable the [headless browser transcript fallback](#advanced-transcripts-headless-browser-fallback) when timedtext is IP-blocked (needs the optional `playwright` peer dependency) |
+| `YTUBE_BROWSER_GAP_MS` | Pause between headless-browser caption jobs so large batches stay paced (default `750`; `0` disables) |
 | `YTUBE_TIMEDTEXT_COOLDOWN` | After a caption HTTP 429/IP block, skip live timedtext for this long and prefer stale cache (default `15m`; `0` disables) |
 | `YTUBE_RATE_LIMIT` | Max billable YouTube calls per hour (default `60`; `0` disables) |
 | `YTUBE_COOKIES` | Path to Netscape `cookies.txt` for age-gated videos you can access |
@@ -452,7 +554,8 @@ Your app / Cursor / Claude
 | --- | --- |
 | `RATE_BUDGET_EXCEEDED` | Local hourly budget reached — wait or raise `YTUBE_RATE_LIMIT` |
 | `RATE_LIMITED` | YouTube returned HTTP 429 — back off |
-| `IP_BLOCKED` | Caption GETs hit YouTube's "Sorry..." IP block — wait, change network/VPN, or set `YTUBE_PROXY` |
+| `IP_BLOCKED` | Caption GETs hit YouTube's "Sorry..." IP block — wait, change network/VPN, set `YTUBE_PROXY`, or enable `YTUBE_BROWSER=1` |
+| `BROWSER_REQUIRED` | Browser fallback was requested but Playwright is not installed — `npm i playwright && npx playwright install chromium` |
 | `NO_CAPTIONS` | No caption tracks on this video |
 | `LANGUAGE_NOT_AVAILABLE` | Requested language not available |
 | `AUTH_REQUIRED` | Sign-in / age gate — set `YTUBE_COOKIES` |

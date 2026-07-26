@@ -6,6 +6,7 @@
  * reported in `failures`, and only budget/connectivity errors stop the run early
  * because those would hit every remaining video too.
  */
+import { browserTranscriptEnabled } from "./browser-transcript.js";
 import { asRecord, asString } from "./chapters.js";
 import { discoverChannelCatalog } from "./channel-catalog.js";
 import { playlist } from "./discovery.js";
@@ -27,7 +28,23 @@ import type {
 export type { BatchFailure, BatchItem, BatchOptions, BatchPack } from "./types.js";
 
 export const DEFAULT_BATCH_LIMIT = 5;
-export const MAX_BATCH_LIMIT = 25;
+/**
+ * Ceiling for one pack page. Agents routinely ask for 20-30 videos per call,
+ * so the cap leaves headroom above that while still bounding a single response.
+ */
+export const MAX_BATCH_LIMIT = 50;
+
+/**
+ * Videos to process in one pack page: absent/non-positive falls back to the
+ * cheap default, and anything above the ceiling is clamped instead of rejected
+ * so an over-eager agent still gets a usable page.
+ */
+export function clampBatchLimit(limit?: number): number {
+  if (limit === undefined || !Number.isFinite(limit) || limit <= 0) {
+    return DEFAULT_BATCH_LIMIT;
+  }
+  return Math.min(Math.floor(limit), MAX_BATCH_LIMIT);
+}
 
 export const HOW_TO_CITE_BATCH =
   "Every chunk carries its own video citation and url; cite the video title plus [M:SS].";
@@ -188,13 +205,7 @@ export async function batchPackFor(
   opts: BatchOptions = {},
   signal?: AbortSignal,
 ): Promise<BatchPack> {
-  let limit = opts.limit ?? 0;
-  if (limit <= 0) {
-    limit = DEFAULT_BATCH_LIMIT;
-  }
-  if (limit > MAX_BATCH_LIMIT) {
-    limit = MAX_BATCH_LIMIT;
-  }
+  const limit = clampBatchLimit(opts.limit);
   let cursor = opts.cursor ?? 0;
   if (cursor < 0) {
     cursor = 0;
@@ -221,6 +232,7 @@ export async function batchPackFor(
   const videos: BatchItem[] = [];
   const failures: BatchFailure[] = [];
   let totalChunks = 0;
+  let consecutiveBlocked = 0;
 
   let index = cursor;
   while (index < src.ids.length && videos.length < limit) {
@@ -241,10 +253,16 @@ export async function batchPackFor(
     } catch (err) {
       failures.push(batchFailure(id, src.names.get(id) ?? "", err, src.contentTypes?.get(id)));
       if (isFatalBatchError(err)) {
-        break;
+        // With the browser fallback on, a block/rate-limit is per video (some
+        // panels simply refuse to load), so one bad video must not sink a
+        // 30-video pack. Bail only once several in a row fail that way.
+        if (!browserRecoverable(err) || ++consecutiveBlocked >= BLOCKED_STREAK_LIMIT) {
+          break;
+        }
       }
       continue;
     }
+    consecutiveBlocked = 0;
     const video = pack.video;
     const item: BatchItem = {
       videoId: video?.id ?? id,
@@ -295,6 +313,8 @@ export async function batchPackFor(
       details: { failures },
     });
   }
+  // Chromium is left warm on purpose: agents usually page through a playlist
+  // with nextCursor, and relaunching per page costs more than the idle timer.
   return pack;
 }
 
@@ -326,6 +346,25 @@ function batchFailure(
 
 function isFatalBatchError(err: unknown): boolean {
   return isExtractError(err) && FATAL_BATCH_CODES.has(err.code);
+}
+
+/**
+ * Codes the headless-browser fallback can get past on the *next* video even
+ * though it failed on this one — the browser has its own egress and each watch
+ * page mounts its own transcript panel.
+ */
+const BROWSER_RECOVERABLE_CODES = new Set(["IP_BLOCKED", "RATE_LIMITED"]);
+/**
+ * Consecutive browser-recoverable failures tolerated before giving up. Enough
+ * that a run of unlucky videos does not end a 30-video pack, few enough that a
+ * genuinely dead egress stops within ~30s instead of grinding through the page.
+ */
+const BLOCKED_STREAK_LIMIT = 5;
+
+function browserRecoverable(err: unknown): boolean {
+  if (!isExtractError(err) || !BROWSER_RECOVERABLE_CODES.has(err.code)) return false;
+  // Packs resolve transcripts through the engine, so only the env switch applies.
+  return browserTranscriptEnabled({});
 }
 
 /** Renders the batch as a markdown table of contents plus optional chunk text. */

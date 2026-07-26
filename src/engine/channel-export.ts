@@ -315,91 +315,125 @@ export async function exportChannelAnalysis(
     const dir = exportRoot(engine);
     await mkdir(dir, { recursive: true, mode: 0o755 });
     return withFileLock(join(dir, jobId + ".lock"), "EXPORT_BUSY", signal, async () => {
-      const dataPath = join(dir, jobId + ".jsonl");
-      const checkpointPath = join(dir, jobId + ".state.json");
-      let state = await readState(checkpointPath);
-
-      if (state !== undefined) {
-        if (state.channelId !== channelId || state.optionsKey !== key) {
-          throw new ExtractError({
-            code: "EXPORT_JOB_MISMATCH",
-            message: "Channel export jobId belongs to different channel/options",
-            details: { jobId },
-          });
-        }
-        if (state.dataPath !== dataPath || state.checkpointPath !== checkpointPath) {
-          throw new ExtractError({
-            code: "EXPORT_CORRUPT",
-            message: "Channel export checkpoint contains unexpected paths",
-            details: { jobId },
-          });
-        }
-        if (!(await exists(state.dataPath))) {
-          throw new ExtractError({
-            code: "EXPORT_DATA_MISSING",
-            message: "Channel export data file is missing for existing checkpoint",
-            details: { jobId, path: state.dataPath },
-          });
-        }
-        await reconcileState(state);
-      } else {
-        if (await exists(dataPath)) {
-          throw new ExtractError({
-            code: "EXPORT_STATE_MISSING",
-            message: "Channel export data exists without a valid checkpoint",
-            details: { jobId, path: dataPath },
-          });
-        }
-        const now = new Date().toISOString();
-        state = {
-          version: STATE_VERSION,
-          jobId,
+      try {
+        return await runExportJob(engine, {
           channelId,
-          title: "",
-          status: "running",
-          cursor: 0,
-          succeeded: 0,
-          failed: 0,
-          processedVideos: 0,
-          processedShorts: 0,
-          catalogVideos: 0,
-          catalogItems: [],
-          catalogReady: false,
-          dataPath,
-          checkpointPath,
-          optionsKey: key,
-          createdAt: now,
-          updatedAt: now,
-        };
-        await writeFile(dataPath, "", { flag: "wx", mode: 0o644 });
-        await writeState(state);
-      }
-
-      if (!state.catalogReady) {
+          key,
+          jobId,
+          dir,
+          opts,
+          signal,
+        });
+      } finally {
+        // Free Chromium after this export slice (completed or paused).
         try {
-          const catalog = await discoverChannelCatalog(
-            engine,
-            channelId,
-            { contentType: opts.contentType ?? "all", ensure: 0 },
-            signal,
-          );
-          state.title = catalog.title;
-          state.catalogItems = catalog.items;
-          state.catalogVideos = catalog.items.length;
-          state.catalogReady = true;
-        } catch (err) {
-          state.status = "paused";
-          state.lastError = catalogFailure(err);
-          await writeState(state);
-          return resultFor(state);
+          const { releaseBrowserIfEnabled } = await import("./browser-transcript.js");
+          await releaseBrowserIfEnabled();
+        } catch {
+          // best-effort
         }
       }
+    });
+  });
+}
 
-      state.status = "running";
-      const exportItems = state.catalogItems;
-      state.catalogVideos = exportItems.length;
-      state.lastError = undefined;
+async function runExportJob(
+  engine: Engine,
+  args: {
+    channelId: string;
+    key: string;
+    jobId: string;
+    dir: string;
+    opts: ChannelExportOptions;
+    signal?: AbortSignal;
+  },
+): Promise<ChannelExportResult> {
+  const { channelId, key, jobId, dir, opts, signal } = args;
+  const dataPath = join(dir, jobId + ".jsonl");
+  const checkpointPath = join(dir, jobId + ".state.json");
+  let state = await readState(checkpointPath);
+
+  if (state !== undefined) {
+    if (state.channelId !== channelId || state.optionsKey !== key) {
+      throw new ExtractError({
+        code: "EXPORT_JOB_MISMATCH",
+        message: "Channel export jobId belongs to different channel/options",
+        details: { jobId },
+      });
+    }
+    if (state.dataPath !== dataPath || state.checkpointPath !== checkpointPath) {
+      throw new ExtractError({
+        code: "EXPORT_CORRUPT",
+        message: "Channel export checkpoint contains unexpected paths",
+        details: { jobId },
+      });
+    }
+    if (!(await exists(state.dataPath))) {
+      throw new ExtractError({
+        code: "EXPORT_DATA_MISSING",
+        message: "Channel export data file is missing for existing checkpoint",
+        details: { jobId, path: state.dataPath },
+      });
+    }
+    await reconcileState(state);
+  } else {
+    if (await exists(dataPath)) {
+      throw new ExtractError({
+        code: "EXPORT_STATE_MISSING",
+        message: "Channel export data exists without a valid checkpoint",
+        details: { jobId, path: dataPath },
+      });
+    }
+    const now = new Date().toISOString();
+    state = {
+      version: STATE_VERSION,
+      jobId,
+      channelId,
+      title: "",
+      status: "running",
+      cursor: 0,
+      succeeded: 0,
+      failed: 0,
+      processedVideos: 0,
+      processedShorts: 0,
+      catalogVideos: 0,
+      catalogItems: [],
+      catalogReady: false,
+      dataPath,
+      checkpointPath,
+      optionsKey: key,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await writeFile(dataPath, "", { flag: "wx", mode: 0o644 });
+    await writeState(state);
+  }
+
+  if (!state.catalogReady) {
+    try {
+      const catalog = await discoverChannelCatalog(
+        engine,
+        channelId,
+        { contentType: opts.contentType ?? "all", ensure: 0 },
+        signal,
+      );
+      state.title = catalog.title;
+      state.catalogItems = catalog.items;
+      state.catalogVideos = catalog.items.length;
+      state.catalogReady = true;
+    } catch (err) {
+      state.status = "paused";
+      state.lastError = catalogFailure(err);
       await writeState(state);
+      return resultFor(state);
+    }
+  }
+
+  state.status = "running";
+  const exportItems = state.catalogItems;
+  state.catalogVideos = exportItems.length;
+  state.lastError = undefined;
+  await writeState(state);
 
   while (state.cursor < exportItems.length) {
     if (signal?.aborted) {
@@ -468,6 +502,4 @@ export async function exportChannelAnalysis(
   state.status = "completed";
   await writeState(state);
   return resultFor(state);
-  });
-  });
 }

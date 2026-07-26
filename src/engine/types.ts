@@ -535,6 +535,10 @@ export interface TranscriptDiagnosis {
   gl: string;
   error?: string;
   attempts?: string[];
+  /** Whether the headless-browser fallback is enabled (YTUBE_BROWSER / opt). */
+  browserConfigured?: boolean;
+  /** Whether Playwright is installed so the browser fallback can actually run. */
+  browserAvailable?: boolean;
 }
 
 /** Controls transcript fetching and presentation. */
@@ -553,6 +557,12 @@ export interface TranscriptOptions {
   stripSoundTags?: boolean;
   /** Attach chapter-bucketed transcript sections. */
   groupByChapters?: boolean;
+  /**
+   * Enable the headless-browser caption fallback when Node timedtext GETs are
+   * IP-blocked. Requires the optional `playwright` peer dependency. Also
+   * enabled globally via `YTUBE_BROWSER=1`.
+   */
+  browser?: boolean;
 }
 
 /** Paging window applied on top of a fetched transcript. */

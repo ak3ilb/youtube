@@ -2,6 +2,10 @@
  * Per-stage report of the caption resolution ladder, for when a transcript call
  * returns an opaque error. Ported from internal/youtube/diagnose.go.
  */
+import {
+  browserTranscriptEnabled,
+  isBrowserTranscriptAvailable,
+} from "./browser-transcript.js";
 import { isExtractError } from "./errors.js";
 import { parseVideoId } from "./ids.js";
 import {
@@ -103,6 +107,8 @@ export async function diagnoseTranscript(
     poTokenConfigured: (process.env.YTUBE_PO_TOKEN ?? "").trim() !== "",
     hl,
     gl,
+    browserConfigured: browserTranscriptEnabled({}),
+    browserAvailable: await isBrowserTranscriptAvailable(),
   };
 
   const opts = { lang };

@@ -62,7 +62,7 @@ server.registerTool(
   {
     title: "Get transcript with timestamps",
     description:
-      "Download the transcript with timestamps. Works for Shorts and long videos. Auto-generated captions are sentence-merged by default. lang accepts a preference chain like 'hi,en' (best-effort by default; set strict=true to hard-fail). Falls back through ANDROID/IOS caption clients, retries empty bodies, and serves a stale cache copy if YouTube is temporarily unreachable. Set maxChars to page long videos via nextCursor. Optional words, translateTo, stripSoundTags, groupByChapters.",
+      "Download the transcript with timestamps. Works for Shorts and long videos. Auto-generated captions are sentence-merged by default. lang accepts a preference chain like 'hi,en' (best-effort by default; set strict=true to hard-fail). Falls back through ANDROID/IOS caption clients, retries empty bodies, and serves a stale cache copy if YouTube is temporarily unreachable. Set maxChars to page long videos via nextCursor. Optional words, translateTo, stripSoundTags, groupByChapters. Set browser=true (needs the optional playwright peer dep, or YTUBE_BROWSER=1) to fetch captions through a headless browser when timedtext is IP-blocked.",
     inputSchema: {
       urlOrId,
       lang: z
@@ -106,9 +106,15 @@ server.registerTool(
         .boolean()
         .optional()
         .describe("Attach chapter-bucketed transcript sections with jump URLs"),
+      browser: z
+        .boolean()
+        .optional()
+        .describe(
+          "Fetch captions through a headless browser when timedtext is IP-blocked (needs optional playwright peer dep; also set by YTUBE_BROWSER=1)",
+        ),
     },
   },
-  async ({ urlOrId, lang, merge, maxChars, cursor, strict, words, translateTo, stripSoundTags, groupByChapters }) =>
+  async ({ urlOrId, lang, merge, maxChars, cursor, strict, words, translateTo, stripSoundTags, groupByChapters, browser }) =>
     handle(() =>
       runEngine("transcript", {
         url: urlOrId,
@@ -121,6 +127,7 @@ server.registerTool(
         "translate-to": translateTo,
         "strip-sound-tags": stripSoundTags,
         "group-chapters": groupByChapters,
+        browser,
       }),
     ),
 );
@@ -279,9 +286,9 @@ const batchPackInput = {
     .number()
     .int()
     .positive()
-    .max(25)
+    .max(50)
     .optional()
-    .describe("Videos to process in this call (default 5). Each video costs several YouTube requests."),
+    .describe("Videos to process in this call (default 5, max 50). Each video costs several YouTube requests."),
   cursor: z
     .number()
     .int()
@@ -337,7 +344,7 @@ server.registerTool(
   {
     title: "Get playlist analysis pack (RAG)",
     description:
-      "Build citation-ready packs for every video in a playlist. Videos without captions are reported in `failures` instead of failing the batch. Processes `limit` videos per call and returns nextCursor/hasMore so you can resume without redoing work (cached videos are free).",
+      "Build citation-ready packs for every video in a playlist. Videos without captions are reported in `failures` instead of failing the batch. Processes `limit` videos per call (default 5, max 50) and returns nextCursor/hasMore so you can resume without redoing work (cached videos are free).",
     inputSchema: {
       urlOrId: z.string().min(1).describe("Playlist URL or list= ID (PL…, UU…, …)"),
       ...batchPackInput,
@@ -351,7 +358,7 @@ server.registerTool(
   {
     title: "Get channel analysis pack (RAG)",
     description:
-      "Progressively discover and pack every long-form upload and Short from a channel. Accepts a channel URL, UC… ID, or @handle. Use contentType to filter and detail=analysis for metadata + transcript + chapters + RAG chunks. Videos without captions are reported in failures; follow nextCursor until hasMore is false.",
+      "Progressively discover and pack every long-form upload and Short from a channel. Accepts a channel URL, UC… ID, or @handle. Use contentType to filter and detail=analysis for metadata + transcript + chapters + RAG chunks. Processes `limit` videos per call (default 5, max 50). Videos without captions are reported in failures; follow nextCursor until hasMore is false.",
     inputSchema: {
       urlOrId: z.string().min(1).describe("Channel URL, UC… ID, or @handle"),
       ...batchPackInput,
