@@ -139,6 +139,53 @@ describe("shared caption parsers (browser body path)", () => {
   });
 });
 
+describe("mergeTimedtextParams / parseTimedtextBody", () => {
+  it("copies pot and client params from a donor timedtext URL", async () => {
+    const { mergeTimedtextParams } = await import("./browser-transcript.js");
+    const base =
+      "https://www.youtube.com/api/timedtext?v=abc&lang=hi&kind=asr&signature=sig&key=yt8";
+    const donor =
+      "https://www.youtube.com/api/timedtext?v=abc&lang=hi&fmt=json3&pot=POTTOKEN&potc=1&c=WEB&cver=2.0";
+    const merged = new URL(mergeTimedtextParams(base, donor));
+    assert.equal(merged.searchParams.get("pot"), "POTTOKEN");
+    assert.equal(merged.searchParams.get("potc"), "1");
+    assert.equal(merged.searchParams.get("c"), "WEB");
+    assert.equal(merged.searchParams.get("lang"), "hi");
+    assert.equal(merged.searchParams.get("signature"), "sig");
+  });
+
+  it("parses harvested json3 and srv1 bodies", async () => {
+    const { parseTimedtextBody } = await import("./browser-transcript.js");
+    const json = JSON.stringify({
+      events: [{ tStartMs: 0, dDurationMs: 1000, segs: [{ utf8: "hola" }] }],
+    });
+    const segs = parseTimedtextBody(json, false);
+    assert.equal(segs.length, 1);
+    assert.equal(segs[0]!.text, "hola");
+
+    const xml =
+      '<?xml version="1.0"?><transcript><text start="1" dur="2">xml cue</text></transcript>';
+    const xmlSegs = parseTimedtextBody(xml, false);
+    assert.equal(xmlSegs.length, 1);
+    assert.equal(xmlSegs[0]!.text, "xml cue");
+
+    assert.equal(parseTimedtextBody("", false).length, 0);
+    assert.equal(parseTimedtextBody("not captions", false).length, 0);
+  });
+
+  it("maps bot interstitial to RATE_LIMITED and age gate to AUTH_REQUIRED", async () => {
+    const { loginRequiredError } = await import("./browser-transcript.js");
+    const bot = loginRequiredError("LOGIN_REQUIRED", "Sign in to confirm you're not a bot");
+    assert.equal(bot.code, "RATE_LIMITED");
+    assert.equal(bot.retryable, true);
+    assert.equal(bot.details?.botCheck, true);
+
+    const age = loginRequiredError("LOGIN_REQUIRED", "Sign in to confirm your age");
+    assert.equal(age.code, "AUTH_REQUIRED");
+    assert.equal(age.retryable, false);
+  });
+});
+
 describe("parsePanelJson (get_panel / Show transcript)", () => {
   it("parses modern transcriptSegmentViewModel cues", async () => {
     const { parsePanelJson } = await import("./browser-transcript.js");

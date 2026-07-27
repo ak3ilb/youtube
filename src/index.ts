@@ -399,7 +399,7 @@ server.registerTool(
   {
     title: "Export complete channel analysis",
     description:
-      "Discover every requested long-form upload and Short, then write metadata, transcript, chapters, and RAG chunks as resumable JSONL. Returns local dataset/checkpoint paths and progress. Reuse jobId to resume a paused export after rate limits, IP blocks, or interruption.",
+      "Discover every requested long-form upload and Short, then write metadata, transcript, chapters, and RAG chunks as resumable JSONL. Returns local dataset/checkpoint paths and progress. Reuse jobId to resume a paused export. Set untilDone=true (and autoBrowser=true) to retry IP_BLOCKED videos via the headless browser and keep going until the catalog is finished instead of pausing.",
     inputSchema: {
       urlOrId: z.string().min(1).describe("Channel URL, UC… ID, or @handle"),
       contentType: z.enum(["all", "videos", "shorts"]).optional().describe("Export subset (default all)"),
@@ -411,9 +411,44 @@ server.registerTool(
         .regex(/^[A-Za-z0-9_-]{8,96}$/)
         .optional()
         .describe("Job ID returned by a paused export; omit to use the deterministic channel/options job"),
+      autoBrowser: z
+        .boolean()
+        .optional()
+        .describe("Enable Playwright browser fallback for this run when timedtext is IP-blocked"),
+      untilDone: z
+        .boolean()
+        .optional()
+        .describe(
+          "Retry blocked videos (with browser) and continue until every catalog item is packed or permanently failed — does not pause the whole job on IP_BLOCKED",
+        ),
+      maxRetryRounds: z
+        .number()
+        .int()
+        .positive()
+        .max(10)
+        .optional()
+        .describe("Retries per video when blocked (default 3 with untilDone)"),
+      retryDelayMs: z
+        .number()
+        .int()
+        .nonnegative()
+        .max(600_000)
+        .optional()
+        .describe("Wait between blocked retries in ms (default 5000)"),
     },
   },
-  async ({ urlOrId, contentType, lang: language, chunkChars, skipSponsors, jobId }) =>
+  async ({
+    urlOrId,
+    contentType,
+    lang: language,
+    chunkChars,
+    skipSponsors,
+    jobId,
+    autoBrowser,
+    untilDone,
+    maxRetryRounds,
+    retryDelayMs,
+  }) =>
     handle(() =>
       runEngine(
         "channelpackall",
@@ -424,8 +459,12 @@ server.registerTool(
           "chunk-chars": chunkChars,
           "skip-sponsors": skipSponsors,
           "job-id": jobId,
+          "auto-browser": autoBrowser,
+          "until-done": untilDone,
+          "max-retry-rounds": maxRetryRounds,
+          "retry-delay-ms": retryDelayMs,
         },
-        { timeoutMs: 15 * 60 * 1000 },
+        { timeoutMs: untilDone ? 24 * 60 * 60 * 1000 : 15 * 60 * 1000 },
       ),
     ),
 );

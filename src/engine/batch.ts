@@ -325,6 +325,7 @@ function batchFailure(
   contentType?: ChannelItemContentType,
 ): BatchFailure {
   if (isExtractError(err)) {
+    const recovery = err.details?.recovery;
     return {
       videoId: id,
       title: title || undefined,
@@ -332,6 +333,10 @@ function batchFailure(
       code: err.code,
       message: err.message,
       retryable: err.retryable,
+      recovery:
+        recovery && typeof recovery === "object"
+          ? (recovery as BatchFailure["recovery"])
+          : undefined,
     };
   }
   return {

@@ -46,6 +46,7 @@ export { Engine, createEngine } from "./transcript.js";
 export * from "./ask.js";
 export * from "./batch.js";
 export * from "./cache.js";
+export * from "./caption-recovery.js";
 export * from "./channel-catalog.js";
 export * from "./channel-export.js";
 export * from "./chapters.js";
@@ -508,6 +509,10 @@ export async function dispatch(
           skipSponsors: flagBool(flags, "skip-sponsors"),
           contentType: flagString(flags, "content-type", "all"),
           jobId: flagString(flags, "job-id") || undefined,
+          autoBrowser: flagBool(flags, "auto-browser"),
+          untilDone: flagBool(flags, "until-done"),
+          maxRetryRounds: flagInt(flags, "max-retry-rounds", 0) || undefined,
+          retryDelayMs: flagInt(flags, "retry-delay-ms", 0) || undefined,
         },
         signal,
       );

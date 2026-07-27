@@ -329,6 +329,54 @@ describe("checkpointed channel export", () => {
     }
   });
 
+  it("untilDone retries IP_BLOCKED then continues with progress events", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ytube-export-untildone-"));
+    const prior = process.env["YTUBE_EXPORT_DIR"];
+    const priorBrowser = process.env["YTUBE_BROWSER"];
+    process.env["YTUBE_EXPORT_DIR"] = join(dir, "exports");
+    let attempts = 0;
+    const phases: string[] = [];
+    try {
+      const engine = await fixtureEngine(dir, (id) => {
+        if (id === VIDEO_1) {
+          attempts++;
+          if (attempts < 2) {
+            throw new ExtractError({
+              code: "IP_BLOCKED",
+              message: "Sorry page",
+              retryable: true,
+              details: { timedtextBlocked: true },
+            });
+          }
+        }
+        return transcriptFor(id);
+      });
+      const result = await exportChannelAnalysis(engine, CHANNEL_ID, {
+        jobId: "fixture-untildone-job",
+        untilDone: true,
+        autoBrowser: true,
+        maxRetryRounds: 3,
+        retryDelayMs: 0,
+        onProgress: (e) => {
+          phases.push(e.phase);
+        },
+      });
+      assert.equal(result.status, "completed");
+      assert.ok(attempts >= 2);
+      assert.ok(phases.includes("catalog"));
+      assert.ok(phases.includes("video_start"));
+      assert.ok(phases.includes("retry_wait") || phases.includes("browser_fallback"));
+      assert.ok(phases.includes("completed"));
+      assert.equal(result.browserUsed, true);
+    } finally {
+      if (prior === undefined) delete process.env["YTUBE_EXPORT_DIR"];
+      else process.env["YTUBE_EXPORT_DIR"] = prior;
+      if (priorBrowser === undefined) delete process.env["YTUBE_BROWSER"];
+      else process.env["YTUBE_BROWSER"] = priorBrowser;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("pauses on a global rate failure and retries the same item", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ytube-export-pause-test-"));
     const prior = process.env["YTUBE_EXPORT_DIR"];

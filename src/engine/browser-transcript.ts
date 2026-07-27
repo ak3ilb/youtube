@@ -9,9 +9,14 @@
  *
  * This module mirrors that flow with Playwright:
  *   1. open https://www.youtube.com/watch?v=ID (always headless, tiny footprint),
- *   2. read `ytInitialPlayerResponse` for the same caption tracks InnerTube sees,
- *   3. `fetch(baseUrl)` for the caption body from *inside the page*,
- *   4. hand the raw json3 / srv1 / srv3 body back to the shared parsers.
+ *   2. harvest the player's own `/api/timedtext` responses (they include `pot=`),
+ *   3. read `ytInitialPlayerResponse` for caption tracks / language pick,
+ *   4. if harvest missed, page-fetch with pot stitched in, then Show transcript,
+ *   5. hand the raw json3 / srv1 / srv3 body back to the shared parsers.
+ *
+ * Important: a bare `fetch(track.baseUrl)` inside the page returns HTTP 200 with
+ * an empty body — YouTube requires the player PoToken on timedtext. Always prefer
+ * harvested player traffic (or merge its `pot` onto the track URL).
  *
  * Playwright is an OPTIONAL peer dependency. If it is not installed the caller
  * gets a clear `BROWSER_REQUIRED` error instead of a crash. The default
@@ -21,8 +26,10 @@
 import { join } from "node:path";
 
 import { ExtractError } from "./errors.js";
+import { withCaptionRecovery } from "./caption-recovery.js";
 import { resolveProxyUrl } from "./proxy.js";
 import { defaultCacheDir } from "./cache.js";
+import { loadNetscapeCookies } from "./cookies.js";
 import type { CaptionTrack, TranscriptSegment, TranscriptSource } from "./types.js";
 
 // These helpers are pure (no network) and safe to import despite the
@@ -249,6 +256,64 @@ function profileDir(): string {
   return join(defaultCacheDir(), "browser-profile");
 }
 
+/**
+ * Distinguishes a real age/sign-in wall from YouTube's anti-bot interstitial
+ * ("Sign in to confirm you're not a bot"), which is transient and retryable.
+ */
+export function loginRequiredError(
+  status: string,
+  reason?: string,
+): ExtractError {
+  const why = `${status} ${reason ?? ""}`.trim();
+  const lower = why.toLowerCase();
+  if (/not a bot|unusual traffic|verify you.?re human|automated queries/.test(lower)) {
+    return new ExtractError({
+      code: "RATE_LIMITED",
+      message:
+        "YouTube asked to sign in to confirm you are not a bot (anti-bot interstitial). " +
+        "Wait, slow the batch (YTUBE_BROWSER_GAP_MS), set YTUBE_PROXY, or retry later.",
+      retryable: true,
+      details: { status, reason: reason ?? "", botCheck: true },
+    });
+  }
+  return new ExtractError({
+    code: "AUTH_REQUIRED",
+    message:
+      reason && /age|inappropriate/i.test(reason)
+        ? `This video requires sign-in to confirm your age (${reason}). Pass cookies via YTUBE_COOKIES.`
+        : `This video requires sign-in or age verification (${why || status})`,
+    retryable: false,
+    details: { status, reason: reason ?? "" },
+  });
+}
+
+/**
+ * Loads `YTUBE_COOKIES` (Netscape cookies.txt path) into the Playwright
+ * context so age-gated / LOGIN_REQUIRED watch pages can unlock captions.
+ */
+async function applyBrowserCookies(ctx: PWContext): Promise<void> {
+  const path = (process.env.YTUBE_COOKIES ?? "").trim();
+  if (path === "") return;
+  try {
+    const jar = await loadNetscapeCookies(path);
+    const cookies = jar.toArray().map((c) => {
+      const domain = c.domain.startsWith(".") ? c.domain : `.${c.domain}`;
+      const entry: PWCookie & { expires?: number; secure?: boolean } = {
+        name: c.name,
+        value: c.value,
+        domain,
+        path: c.path || "/",
+      };
+      if (c.expires !== undefined && c.expires > 0) entry.expires = c.expires;
+      if (c.secure) entry.secure = true;
+      return entry;
+    });
+    if (cookies.length > 0) await ctx.addCookies(cookies);
+  } catch {
+    // Invalid/missing cookies file must not block the anonymous browser path.
+  }
+}
+
 function cancelIdleClose(): void {
   if (idleTimer) {
     clearTimeout(idleTimer);
@@ -318,6 +383,8 @@ async function getContext(): Promise<PWContext> {
       { name: "SOCS", value: "CAI", domain: ".youtube.com", path: "/" },
       { name: "CONSENT", value: "YES+1", domain: ".youtube.com", path: "/" },
     ]);
+    // Optional logged-in session for age-gated / LOGIN_REQUIRED videos.
+    await applyBrowserCookies(ctx);
     // Soften Playwright's default automation markers before any page loads.
     await ctx.addInitScript(() => {
       Object.defineProperty(navigator, "webdriver", { get: () => undefined });
@@ -505,113 +572,394 @@ async function fetchCaptionSegmentsViaBrowserOnPage(
   signal?: AbortSignal,
 ): Promise<BrowserCaptionResult> {
   if (signal?.aborted) throw new ExtractError({ code: "ABORTED", message: "aborted" });
-  await page.goto(`https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`, {
-    waitUntil: "domcontentloaded",
-    timeout: PLAYER_WAIT_MS,
-  });
 
-  const raw = await readPlayerResponse(page, videoId);
-  const status = (raw.status ?? "").toUpperCase();
-  if (status === "LOGIN_REQUIRED" || status === "AGE_CHECK_REQUIRED" || status === "CONTENT_CHECK_REQUIRED") {
-    throw new ExtractError({
-      code: "AUTH_REQUIRED",
-      message: `This video requires sign-in or age verification (${status})`,
-      details: { reason: raw.reason },
-    });
-  }
-  if (status === "ERROR" || status === "UNPLAYABLE") {
-    throw new ExtractError({
-      code: "VIDEO_UNAVAILABLE",
-      message: raw.reason || "YouTube reported this video is unavailable",
-      details: { reason: raw.reason },
-    });
-  }
-  if (raw.videoId && raw.videoId !== videoId) {
-    throw new ExtractError({
-      code: "BROWSER_VIDEO_MISMATCH",
-      message: `Watch page loaded ${raw.videoId} instead of ${videoId}`,
-      retryable: true,
-    });
-  }
+  // Harvest the player's own timedtext responses *before* navigation. Those
+  // requests include a PoToken (`pot=…`) YouTube requires; a bare page.fetch of
+  // the caption-track baseUrl returns HTTP 200 with an empty body.
+  const harvest = createTimedtextHarvester(page);
+  page.on("response", harvest.onResponse);
 
-  const tracks = captionsFromPlayer(raw.player!);
-  if (tracks.length === 0) {
-    throw new ExtractError({
-      code: "NO_CAPTIONS",
-      message: "This video has no caption tracks (the uploader disabled them or none were generated)",
+  try {
+    await page.goto(`https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`, {
+      waitUntil: "domcontentloaded",
+      timeout: PLAYER_WAIT_MS,
     });
-  }
 
-  // Resolve the track + timedtext URL exactly like the network path.
-  let baseUrl: string;
-  let picked: CaptionTrack;
-  let translatedFrom = "";
-  let source: TranscriptSource;
-  let resolvedLang: string;
-  const warnings: string[] = ["browser_fallback"];
-
-  if (opts.translateTo) {
-    const base = tracks.find((t) => t.isTranslatable) ?? tracks[0]!;
-    if (!base.isTranslatable) {
+    const raw = await readPlayerResponse(page, videoId);
+    const status = (raw.status ?? "").toUpperCase();
+    if (status === "LOGIN_REQUIRED" || status === "AGE_CHECK_REQUIRED" || status === "CONTENT_CHECK_REQUIRED") {
+      throw loginRequiredError(status, raw.reason);
+    }
+    if (status === "ERROR" || status === "UNPLAYABLE") {
       throw new ExtractError({
-        code: "TRANSLATION_UNAVAILABLE",
-        message: "No translatable caption track available for this video",
+        code: "VIDEO_UNAVAILABLE",
+        message: raw.reason || "YouTube reported this video is unavailable",
+        details: { reason: raw.reason },
       });
     }
-    baseUrl = withTranscriptLang(trackBaseUrl(base), opts.translateTo);
-    picked = { ...base, languageCode: opts.translateTo, isAutoGenerated: true };
-    translatedFrom = base.languageCode;
-    source = "translated";
-    resolvedLang = opts.translateTo;
-  } else {
-    const result = pickCaptionTrack(tracks, opts.lang, opts.strict === true);
-    picked = result.track;
-    baseUrl = result.captionUrl;
-    translatedFrom = result.translatedFrom;
-    source = result.source;
-    resolvedLang = result.resolvedLang;
-    warnings.push(...result.warnings);
-  }
+    if (raw.videoId && raw.videoId !== videoId) {
+      throw new ExtractError({
+        code: "BROWSER_VIDEO_MISMATCH",
+        message: `Watch page loaded ${raw.videoId} instead of ${videoId}`,
+        retryable: true,
+      });
+    }
 
-  // Stage D: same-origin timedtext fetch (fast, keeps word timings).
-  // Stage E: Show transcript panel — Cursor browser verified this succeeds
-  // even when timedtext returns HTTP 429 "Sorry..." on the same IP.
-  const body = await fetchTrackBody(page, baseUrl, opts.words === true);
-  if (body.segments.length > 0) {
-    return { segments: body.segments, track: picked, translatedFrom, source, resolvedLang, warnings };
-  }
+    const tracks = captionsFromPlayer(raw.player!);
+    if (tracks.length === 0) {
+      throw new ExtractError({
+        code: "NO_CAPTIONS",
+        message: "This video has no caption tracks (the uploader disabled them or none were generated)",
+      });
+    }
 
-  const panel = await scrapeTranscriptPanel(page);
-  if (panel.length > 0) {
-    return {
-      segments: panel,
+    // Resolve the track + timedtext URL exactly like the network path.
+    let baseUrl: string;
+    let picked: CaptionTrack;
+    let translatedFrom = "";
+    let source: TranscriptSource;
+    let resolvedLang: string;
+    let warnings: string[] = ["browser_fallback"];
+    const wantWords = opts.words === true;
+
+    if (opts.translateTo) {
+      const base = tracks.find((t) => t.isTranslatable) ?? tracks[0]!;
+      if (!base.isTranslatable) {
+        throw new ExtractError({
+          code: "TRANSLATION_UNAVAILABLE",
+          message: "No translatable caption track available for this video",
+        });
+      }
+      baseUrl = withTranscriptLang(trackBaseUrl(base), opts.translateTo);
+      picked = { ...base, languageCode: opts.translateTo, isAutoGenerated: true };
+      translatedFrom = base.languageCode;
+      source = "translated";
+      resolvedLang = opts.translateTo;
+    } else {
+      const result = pickCaptionTrack(tracks, opts.lang, opts.strict === true);
+      picked = result.track;
+      baseUrl = result.captionUrl;
+      translatedFrom = result.translatedFrom;
+      source = result.source;
+      resolvedLang = result.resolvedLang;
+      warnings.push(...result.warnings);
+    }
+
+    const ok = (segments: TranscriptSegment[], extraWarnings: string[] = []): BrowserCaptionResult => ({
+      segments,
       track: picked,
       translatedFrom,
       source,
       resolvedLang,
-      warnings: [...warnings, "browser_panel_fallback"],
+      warnings: [...warnings, ...extraWarnings],
+    });
+
+    /** When harvest returns a native track body, drop false "translated to en" labels. */
+    const alignHarvestMeta = (harvestLang: string): void => {
+      const lang = harvestLang.trim().toLowerCase();
+      if (lang === "") return;
+      const native =
+        tracks.find((t) => t.languageCode.toLowerCase() === lang) ??
+        tracks.find((t) => t.languageCode.toLowerCase().startsWith(lang.split("-")[0]!));
+      if (!native) {
+        resolvedLang = harvestLang;
+        return;
+      }
+      const wasTranslateClaim =
+        translatedFrom !== "" || source === "translated" || resolvedLang.toLowerCase() !== native.languageCode.toLowerCase();
+      picked = native;
+      resolvedLang = native.languageCode;
+      translatedFrom = "";
+      source = native.isAutoGenerated ? "asr" : "manual";
+      if (wasTranslateClaim) {
+        warnings = warnings.filter((w) => !/auto-translate|No native/i.test(w));
+      }
     };
+
+    // Prefer requested langs, then the picked track lang (player usually serves native ASR).
+    const preferLangs = [
+      ...(opts.lang ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
+      picked.languageCode,
+      ...tracks.map((t) => t.languageCode),
+    ];
+
+    // Stage C: player's own timedtext (already has pot=). Prefer lang match.
+    let harvested = await harvest.waitForHarvest(wantWords, preferLangs, 6_000);
+    if (harvested.segments.length > 0) {
+      alignHarvestMeta(harvested.lang);
+      return ok(harvested.segments, ["browser_timedtext_harvest"]);
+    }
+
+    // Nudge the player to (re)request captions if autoplay did not load them.
+    await clickCaptionsButton(page);
+    harvested = await harvest.waitForHarvest(wantWords, preferLangs, 5_000);
+    if (harvested.segments.length > 0) {
+      alignHarvestMeta(harvested.lang);
+      return ok(harvested.segments, ["browser_timedtext_harvest"]);
+    }
+
+    // Stage D: same-origin fetch, but stitch in pot/client params from any
+    // harvested timedtext URL (or performance entries) so the body is non-empty.
+    const enrichedUrl = harvest.enrichUrl(baseUrl) ?? (await enrichUrlFromPage(page, baseUrl));
+    const body = await fetchTrackBody(page, enrichedUrl ?? baseUrl, wantWords);
+    if (body.segments.length > 0) {
+      return ok(body.segments, enrichedUrl ? ["browser_timedtext_pot"] : []);
+    }
+
+    // Stage E: Show transcript panel — works when get_transcript is healthy;
+    // many Shorts return FAILED_PRECONDITION here even when timedtext works.
+    const panel = await scrapeTranscriptPanel(page);
+    if (panel.length > 0) {
+      return ok(panel, ["browser_panel_fallback"]);
+    }
+
+    // Nothing worked. If timedtext was Sorry-blocked and the panel never
+    // populated, set a clean proxy (the headless browser honors YTUBE_PROXY).
+    if (body.blocked || harvest.sawBlocked) {
+      throw withCaptionRecovery(
+        new ExtractError({
+          code: "IP_BLOCKED",
+          message:
+            "Captions exist for this video, but timedtext is IP-blocked (HTTP 429 Sorry page) and " +
+            "the Show transcript panel did not return cues (get_transcript often fails with " +
+            "FAILED_PRECONDITION when the player shows CC unavailable). Browser fallback alone " +
+            "cannot recover this video — set YTUBE_PROXY to a clean residential egress or switch network.",
+          retryable: true,
+          details: {
+            videoId,
+            timedtextBlocked: true,
+            panelEmpty: true,
+          },
+        }),
+        {
+          tracksExist: true,
+          timedtextBlocked: true,
+          panelUnavailable: true,
+          browserConfigured: true,
+        },
+      );
+    }
+    throw new ExtractError({
+      code: "EMPTY_TRANSCRIPT",
+      message:
+        "The browser reached the caption track but it contained no cues " +
+        "(player timedtext harvest empty; in-page fetch empty; Show transcript panel empty)",
+      retryable: true,
+      details: { videoId, harvestedBodies: harvest.bodyCount },
+    });
+  } finally {
+    page.off?.("response", harvest.onResponse);
+  }
+}
+
+/** One parsed timedtext harvest (segments + language from the request URL). */
+interface HarvestedCaptions {
+  segments: TranscriptSegment[];
+  lang: string;
+  url: string;
+}
+
+/** Captures `/api/timedtext` bodies the watch page itself requests (with pot). */
+interface TimedtextHarvester {
+  onResponse: (res: PWResponse) => void;
+  /** Prefer lang-matching non-empty bodies; waits up to `timeoutMs`. */
+  waitForHarvest: (
+    wantWords: boolean,
+    preferLangs: string[],
+    timeoutMs: number,
+  ) => Promise<HarvestedCaptions>;
+  /** Copy pot/client query params from a harvested URL onto `baseUrl`. */
+  enrichUrl: (baseUrl: string) => string | null;
+  readonly sawBlocked: boolean;
+  readonly bodyCount: number;
+}
+
+function createTimedtextHarvester(page: PWPage): TimedtextHarvester {
+  void page;
+  const bodies: Array<{ url: string; body: string }> = [];
+  let sawBlocked = false;
+
+  const onResponse = (res: PWResponse): void => {
+    const u = res.url();
+    if (!u.includes("/api/timedtext")) return;
+    void res
+      .text()
+      .then((text) => {
+        const verdict = classifyFetch(res.status(), text);
+        if (verdict === "blocked") {
+          sawBlocked = true;
+          return;
+        }
+        if (verdict === "ok" && text.length > 0) {
+          bodies.push({ url: u, body: text });
+        }
+      })
+      .catch(() => {
+        // ignore body read failures
+      });
+  };
+
+  async function waitForHarvest(
+    wantWords: boolean,
+    preferLangs: string[],
+    timeoutMs: number,
+  ): Promise<HarvestedCaptions> {
+    const empty: HarvestedCaptions = { segments: [], lang: "", url: "" };
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const hit = pickHarvestedCaptions(bodies, wantWords, preferLangs);
+      if (hit.segments.length > 0) return hit;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return pickHarvestedCaptions(bodies, wantWords, preferLangs) ?? empty;
   }
 
-  // Nothing worked. If timedtext was Sorry-blocked and the panel never
-  // populated, set a clean proxy (the headless browser honors YTUBE_PROXY).
-  if (body.blocked) {
-    throw new ExtractError({
-      code: "IP_BLOCKED",
-      message:
-        "YouTube blocked timedtext from this IP (HTTP 429 Sorry page) and the Show transcript " +
-        "panel did not populate in headless mode. Set YTUBE_PROXY / HTTPS_PROXY to a clean " +
-        "(residential) egress — the headless browser routes through it. " +
-        "Note: a full Cursor/Chrome session can still show the panel when get_transcript works.",
-      retryable: true,
-      details: { hint: "YTUBE_PROXY=http://user:pass@host:port" },
-    });
+  function enrichUrl(baseUrl: string): string | null {
+    const donor = bodies.find((b) => /[?&]pot=/.test(b.url))?.url;
+    if (!donor) return null;
+    return mergeTimedtextParams(baseUrl, donor);
   }
-  throw new ExtractError({
-    code: "EMPTY_TRANSCRIPT",
-    message: "The browser reached the caption track but it contained no cues",
-    retryable: true,
+
+  return {
+    onResponse,
+    waitForHarvest,
+    enrichUrl,
+    get sawBlocked() {
+      return sawBlocked;
+    },
+    get bodyCount() {
+      return bodies.length;
+    },
+  };
+}
+
+/** Parses harvested timedtext bodies; prefers langs in `preferLangs` order. */
+function pickHarvestedCaptions(
+  bodies: Array<{ url: string; body: string }>,
+  wantWords: boolean,
+  preferLangs: string[],
+): HarvestedCaptions {
+  if (bodies.length === 0) return { segments: [], lang: "", url: "" };
+  const wants = preferLangs.map((l) => l.trim().toLowerCase()).filter(Boolean);
+  const rank = (lang: string): number => {
+    const i = wants.indexOf(lang);
+    if (i >= 0) return i;
+    const base = lang.split("-")[0] ?? lang;
+    const j = wants.findIndex((w) => w === base || w.startsWith(base));
+    return j >= 0 ? j + 0.5 : 999;
+  };
+  const ordered = [...bodies].sort((a, b) => {
+    const aLang = langFromTimedtextUrl(a.url);
+    const bLang = langFromTimedtextUrl(b.url);
+    const byLang = rank(aLang) - rank(bLang);
+    if (byLang !== 0) return byLang;
+    // Prefer json3 (word timings) over xml.
+    const aJson = /[?&]fmt=json3\b/.test(a.url) || a.body.trimStart().startsWith("{") ? 0 : 1;
+    const bJson = /[?&]fmt=json3\b/.test(b.url) || b.body.trimStart().startsWith("{") ? 0 : 1;
+    return aJson - bJson;
   });
+  for (const { url, body } of ordered) {
+    const segs = parseTimedtextBody(body, wantWords);
+    if (segs.length > 0) {
+      return { segments: segs, lang: langFromTimedtextUrl(url), url };
+    }
+  }
+  return { segments: [], lang: "", url: "" };
+}
+
+function langFromTimedtextUrl(url: string): string {
+  try {
+    return new URL(url).searchParams.get("lang")?.toLowerCase() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** Parses a raw timedtext body as json3 or srv1/srv3 XML. */
+export function parseTimedtextBody(body: string, wantWords: boolean): TranscriptSegment[] {
+  const trimmed = body.trim();
+  if (trimmed === "") return [];
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      return parseJSON3(body, wantWords);
+    } catch {
+      return [];
+    }
+  }
+  if (trimmed.startsWith("<")) {
+    try {
+      return parseTimedTextXML(body);
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+/**
+ * Copies YouTube player binding params (`pot`, client hints, …) from a working
+ * timedtext URL onto the caption-track base URL.
+ */
+export function mergeTimedtextParams(baseUrl: string, donorUrl: string): string {
+  try {
+    const base = new URL(baseUrl, "https://www.youtube.com");
+    const donor = new URL(donorUrl, "https://www.youtube.com");
+    for (const key of [
+      "pot",
+      "potc",
+      "c",
+      "cbr",
+      "cbrver",
+      "cver",
+      "cos",
+      "cosver",
+      "cplatform",
+      "cplayer",
+      "xobt",
+      "xorb",
+      "xovt",
+    ]) {
+      const v = donor.searchParams.get(key);
+      if (v) base.searchParams.set(key, v);
+    }
+    return base.toString();
+  } catch {
+    return baseUrl;
+  }
+}
+
+/** Last-resort: read pot from performance resource entries on the page. */
+async function enrichUrlFromPage(page: PWPage, baseUrl: string): Promise<string | null> {
+  const donor = await page.evaluate(() => {
+    try {
+      const entries = performance.getEntriesByType("resource") as Array<{ name: string }>;
+      for (const e of entries) {
+        if (e.name.includes("/api/timedtext") && e.name.includes("pot=")) return e.name;
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  });
+  return donor ? mergeTimedtextParams(baseUrl, donor) : null;
+}
+
+/** Toggles the player CC button so YouTube (re)fetches timedtext with pot. */
+async function clickCaptionsButton(page: PWPage): Promise<void> {
+  try {
+    await page.evaluate(() => {
+      const btn =
+        (document.querySelector("button.ytp-subtitles-button") as HTMLElement | null) ??
+        (document.querySelector(".ytp-subtitles-button") as HTMLElement | null);
+      if (btn) btn.click();
+    });
+    await page.waitForTimeout(400);
+  } catch {
+    // best-effort
+  }
 }
 
 /** json3 first, then srv1/srv3 — mirrors `fetchCaptionSegments`, all in-page. */

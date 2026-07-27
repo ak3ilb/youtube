@@ -24,6 +24,34 @@ const pack = await yt.getVideoPack("https://www.youtube.com/watch?v=jNQXAC9IVRw"
 
 ---
 
+## Disclaimer
+
+This project was created to **help people build and learn** — for education,
+experimentation, and legitimate product/agent workflows around public YouTube
+content.
+
+**Wrong or abusive use is not supported.** That includes (and is not limited to)
+using this package, its MCP tools, or prompts around it to:
+
+- Harass, stalk, dox, or harm people
+- Infringe copyright or redistribute content you do not have rights to use
+- Circumvent paywalls, DRM, age gates, or access controls you are not entitled to
+- Scrape, spam, or overwhelm YouTube beyond normal personal/agent use and rate limits
+- Run phishing, malware, fraud, or other illegal activity
+- Jailbreak, trick, or prompt an agent into doing any of the above
+
+You are responsible for how you use this software. Follow [YouTube's Terms of
+Service](https://www.youtube.com/t/terms), applicable copyright and privacy laws,
+and the rules of any platform or employer you run it under. The authors do not
+endorse misuse, do not provide support for harmful prompting or bypasses, and
+accept no liability for damage or claims arising from improper use.
+
+This package does **not** bypass DRM, paywalls, or BotGuard. Prefer the official
+[YouTube Data API](https://developers.google.com/youtube/v3) when you need
+guarantees backed by Google.
+
+---
+
 ## Features
 
 - Reliable transcripts for Shorts and long videos — multi-client fallback (ANDROID → IOS → WEB), caption retry ladder, stable disk cache, stale-cache rescue
@@ -36,7 +64,7 @@ const pack = await yt.getVideoPack("https://www.youtube.com/watch?v=jNQXAC9IVRw"
 - `askVideo` — answer a question from the best passages instead of the whole transcript
 - `getChannelCatalog` — exhaustively page a creator's Videos and Shorts tabs
 - `getPlaylistPack` / `getChannelPack` — batch many videos, resume with a cursor, skip failures
-- `exportChannelAnalysis` — checkpointed full-channel JSONL export that safely resumes
+- `exportChannelAnalysis` — checkpointed full-channel JSONL export with live progress, auto browser on IP block, and `untilDone` retries
 - Paged transcripts (`maxChars` + `nextCursor`) for context-limited agents
 - Chapters, captions, related videos, comments (sort, replies, paging), playlists, channels, search
 - Local disk cache and hourly rate budget
@@ -82,8 +110,17 @@ ffmpeg muxing, and no live-fragment downloads. See [Limitations](#limitations).
 
 YouTube's `/api/timedtext` endpoint sometimes answers with a small HTML
 **"Sorry..."** page and HTTP 429. That is an **IP reputation block**, not a
-parser bug — InnerTube player calls can still succeed while caption body GETs
-fail. Competing libraries from the same IP fail the same way.
+parser bug — InnerTube player calls can still succeed (tracks are listed) while
+caption body GETs fail. Competing libraries from the same IP fail the same way.
+
+Errors and `diagnoseTranscript` now include a `recovery` object so agents can
+show the right next step instead of busy-retrying:
+
+| `recovery.kind` | Meaning | What to do |
+| --- | --- | --- |
+| `browser_or_proxy` | Tracks exist; timedtext blocked; panel may still work | Enable `YTUBE_BROWSER=1`, or set `YTUBE_PROXY` |
+| `proxy_required` | Tracks exist; timedtext blocked **and** Show transcript / `get_transcript` is unusable for this video (FAILED_PRECONDITION / CC unavailable) | **Proxy or new network only** — browser alone will not help |
+| `wait_or_proxy` | Browser already configured; still blocked | Wait for cooldown, or change egress |
 
 **Fixes that work:**
 
@@ -94,8 +131,8 @@ fail. Competing libraries from the same IP fail the same way.
    (or `HTTPS_PROXY`). Residential egress works best; datacenter IPs are often
    blocked faster.
 4. Enable the [headless browser fallback](#advanced-transcripts-headless-browser-fallback)
-   (`YTUBE_BROWSER=1`) — it fetches captions the same way the watch page does,
-   from inside a real browser session.
+   (`YTUBE_BROWSER=1`) — helps when the watch-page panel still loads cues.
+   It does **not** help for `recovery.kind = proxy_required` videos.
 
 ---
 
@@ -408,27 +445,53 @@ under newly uploaded videos. Start again with `refresh: true` and `cursor: 0`
 when you want a fresh snapshot; old cursors are intentionally invalidated.
 
 For a large creator, export analysis records to disk instead of returning every
-transcript in one response:
+transcript in one response. Prefer `untilDone` + `autoBrowser` + `onProgress` so
+the run lists the full catalog, retries IP-blocked videos via the headless
+browser, and keeps going until every item is packed or permanently failed:
 
 ```ts
+import { YouTubeClient, defaultChannelExportLogger } from "youtube-client-mcp";
+
+const client = new YouTubeClient({ timeoutMs: 24 * 60 * 60 * 1000 });
+
 const job = await client.exportChannelAnalysis("@mkbhd", {
-  contentType: "all",
+  contentType: "all", // or "videos" | "shorts"
   lang: "en",
+  autoBrowser: true,  // YTUBE_BROWSER=1 for this run
+  untilDone: true,    // retry blocks, then continue (do not pause the whole job)
+  maxRetryRounds: 3,
+  retryDelayMs: 5_000,
+  onProgress: defaultChannelExportLogger, // stderr: percent, phase, recovery hints
 });
 
-console.log(job.status, job.dataPath, job.checkpointPath);
-// If paused by a rate limit, IP block, timeout, or restart:
+console.log(job.status, job.succeeded, job.failed, job.dataPath);
+```
+
+CLI (same behavior, progress on stderr, JSON summary on stdout):
+
+```bash
+npm run channel:export -- @mkbhd
+CONTENT_TYPE=shorts MAX_RETRY=5 npm run channel:export -- @handle
+```
+
+Without `untilDone`, global failures such as `IP_BLOCKED` still **pause** before
+advancing the current video so a later call with the same `jobId` retries it:
+
+```ts
+const paused = await client.exportChannelAnalysis("@mkbhd", { contentType: "all" });
 const resumed = await client.exportChannelAnalysis("@mkbhd", {
   contentType: "all",
-  lang: "en",
-  jobId: job.jobId,
+  jobId: paused.jobId,
 });
 ```
 
+Progress events (`phase`) include: `starting`, `catalog`, `video_start`,
+`video_ok`, `video_fail`, `browser_fallback`, `retry_wait`, `paused`, `completed`.
+Blocked failures carry `recovery.kind` (`browser_or_proxy` / `proxy_required`).
+
 The JSONL file contains one record per discovered item. Successful records carry
 `video`, `transcript`, `chapters`, and `chunks`; unavailable/private/captionless
-videos produce structured `failure` records. Global failures such as
-`IP_BLOCKED` pause before advancing the current video, so resume retries it.
+videos produce structured `failure` records.
 
 ---
 
@@ -525,7 +588,9 @@ Example prompt:
 | `YTUBE_SPONSORBLOCK` | Set `1` to enable [SponsorBlock](https://sponsor.ajay.app) lookups (off by default) |
 | `YTUBE_SPONSORBLOCK_CATEGORIES` | Comma-separated categories (default sponsor, selfpromo, interaction, intro, outro, preview, music_offtopic) |
 
-Use your own cookies and API key. Respect rate limits. This package does not bypass DRM, paywalls, or BotGuard.
+Use your own cookies and API key. Respect rate limits. This package does not
+bypass DRM, paywalls, or BotGuard. See the [Disclaimer](#disclaimer) — learning
+and legitimate use only; wrong usage and harmful prompting are not supported.
 
 SponsorBlock is opt-in because enabling it sends the video ID to a third-party
 service. With `YTUBE_SPONSORBLOCK=1`, `getSponsorSegments` lists the flagged
@@ -558,7 +623,7 @@ Your app / Cursor / Claude
 | --- | --- |
 | `RATE_BUDGET_EXCEEDED` | Local hourly budget reached — wait or raise `YTUBE_RATE_LIMIT` |
 | `RATE_LIMITED` | YouTube returned HTTP 429 — back off |
-| `IP_BLOCKED` | Caption GETs hit YouTube's "Sorry..." IP block — wait, change network/VPN, set `YTUBE_PROXY`, or enable `YTUBE_BROWSER=1` |
+| `IP_BLOCKED` | Caption GETs hit YouTube's "Sorry..." IP block. Check `error.details.recovery` — `browser_or_proxy` vs `proxy_required` (panel also dead for that video) |
 | `BROWSER_REQUIRED` | Browser fallback was requested but Playwright is not installed — `npm i playwright && npx playwright install chromium` |
 | `NO_CAPTIONS` | No caption tracks on this video |
 | `LANGUAGE_NOT_AVAILABLE` | Requested language not available |
@@ -578,7 +643,7 @@ Your app / Cursor / Claude
 - No ffmpeg muxing (video + audio as separate streams when needed)
 - Live fragment download is not supported (manifests only)
 - Heatmap, related, and storyboards depend on what YouTube returns for the video
-- Paged batch packs process at most 25 videos per call, by design, to protect your IP
+- Paged batch packs process at most 50 videos per call, by design, to protect your IP
 - Full-channel export is sequential and checkpointed; caption availability still depends on each video and YouTube's IP/rate limits
 - `askVideo` ranks passages lexically (BM25); it retrieves context rather than generating an answer
 - Videos without captions cannot be transcribed; there is no speech-to-text fallback
@@ -607,3 +672,7 @@ npm run smoke
 ## License
 
 [MIT](LICENSE)
+
+By using this software you acknowledge the [Disclaimer](#disclaimer): it is
+intended for learning and legitimate use; the authors do not support wrong
+usages, harmful prompting, or ToS/copyright abuse.

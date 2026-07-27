@@ -6,6 +6,7 @@ import {
   browserTranscriptEnabled,
   isBrowserTranscriptAvailable,
 } from "./browser-transcript.js";
+import { buildCaptionRecovery, recoveryFromError } from "./caption-recovery.js";
 import { isExtractError } from "./errors.js";
 import { parseVideoId } from "./ids.js";
 import {
@@ -35,6 +36,7 @@ export type {
   SelectedTrackInfo,
   TranscriptDiagnosis,
 } from "./types.js";
+export type { CaptionRecovery } from "./caption-recovery.js";
 
 /** Attempts look like "ANDROID: OK tracks=2" or "WEB: UNPLAYABLE (…)". */
 function probeFromAttempt(line: string, withError: boolean): ClientProbe {
@@ -141,7 +143,8 @@ export async function diagnoseTranscript(
 
   // Skip caption-body probes while timedtext is cooling down after a 429.
   if (isTimedtextCoolingDown()) {
-    diag.error = `RATE_LIMITED: timedtext cooldown (~${timedtextCooldownRemainingSec()}s); skipped body probe`;
+    const left = timedtextCooldownRemainingSec();
+    diag.error = `RATE_LIMITED: timedtext cooldown (~${left}s); skipped body probe`;
     const resolved = await engine.resolveCaptionTracksResult(id, signal);
     diag.attempts = resolved.attempts;
     diag.clients = resolved.attempts.map((line) => probeFromAttempt(line, true));
@@ -151,6 +154,15 @@ export async function diagnoseTranscript(
     if (diag.staleAvailable || diag.cacheHit) {
       diag.ok = true;
       diag.formatUsed = diag.cacheHit ? "cache" : "stale-cache";
+    } else {
+      diag.recovery = buildCaptionRecovery({
+        tracksExist: (diag.tracks?.length ?? 0) > 0,
+        timedtextBlocked: true,
+        cooldown: true,
+        cooldownSec: left,
+        browserConfigured: diag.browserConfigured,
+        browserAvailable: diag.browserAvailable,
+      });
     }
     return diag;
   }
@@ -161,6 +173,10 @@ export async function diagnoseTranscript(
   diag.clients = resolved.attempts.map((line) => probeFromAttempt(line, true));
   if (resolved.error !== undefined) {
     diag.error = errorText(resolved.error);
+    diag.recovery = recoveryFromError(resolved.error, {
+      browserConfigured: diag.browserConfigured,
+      browserAvailable: diag.browserAvailable,
+    });
     return diag;
   }
   diag.tracks = resolved.tracks.map(briefFromTrack);
@@ -184,6 +200,19 @@ export async function diagnoseTranscript(
     probe = await probeCaptionBody(engine, picked.captionUrl, signal);
   } catch (err) {
     diag.error = errorText(err);
+    const blocked =
+      isExtractError(err) && (err.code === "IP_BLOCKED" || err.code === "RATE_LIMITED");
+    diag.recovery = buildCaptionRecovery({
+      tracksExist: true,
+      timedtextBlocked: blocked,
+      cooldown: isExtractError(err) && err.details?.cooldown === true,
+      cooldownSec:
+        isExtractError(err) && typeof err.details?.retryAfterSec === "number"
+          ? (err.details.retryAfterSec as number)
+          : undefined,
+      browserConfigured: diag.browserConfigured,
+      browserAvailable: diag.browserAvailable,
+    });
     return diag;
   }
   diag.formatUsed = probe.format;
@@ -193,6 +222,11 @@ export async function diagnoseTranscript(
     diag.bodyBytes = estimateBodyBytes(probe.segments);
   } else {
     diag.error = "EMPTY_TRANSCRIPT: caption body had no segments";
+    diag.recovery = buildCaptionRecovery({
+      tracksExist: true,
+      browserConfigured: diag.browserConfigured,
+      browserAvailable: diag.browserAvailable,
+    });
   }
   return diag;
 }
@@ -210,7 +244,7 @@ async function probeCaptionBody(
       return { segments: segs, format: "json3" };
     }
   } catch (err) {
-    if (isExtractError(err) && err.code === "RATE_LIMITED") {
+    if (isExtractError(err) && (err.code === "RATE_LIMITED" || err.code === "IP_BLOCKED")) {
       throw err;
     }
     json3Err = err;
@@ -222,7 +256,7 @@ async function probeCaptionBody(
         return { segments: segs, format };
       }
     } catch (err) {
-      if (isExtractError(err) && err.code === "RATE_LIMITED") {
+      if (isExtractError(err) && (err.code === "RATE_LIMITED" || err.code === "IP_BLOCKED")) {
         throw err;
       }
     }

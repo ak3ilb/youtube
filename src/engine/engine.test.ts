@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 
 import { formatTimestamp, parseTimestamp, watchURLAt } from "./timestamps.js";
 import { parseVideoID, parsePlaylistID } from "./ids.js";
-import { parseLangChain, pickCaptionTrack, mergeASRSegments, normalizeCaptionText } from "./transcript.js";
+import { parseLangChain, pickCaptionTrack, mergeASRSegments, normalizeCaptionText, absolutizeCaptionUrl } from "./transcript.js";
 import { parseChapters } from "./chapters.js";
 import { pageTranscript } from "./paging.js";
 import { buildRAGChunks } from "./rag.js";
@@ -43,6 +43,24 @@ describe("ids", () => {
     assert.equal(
       parsePlaylistID("https://www.youtube.com/playlist?list=PLtest1234567890"),
       "PLtest1234567890",
+    );
+  });
+});
+
+describe("caption URLs", () => {
+  it("absolutizes relative timedtext URLs from watch-page HTML", () => {
+    assert.equal(absolutizeCaptionUrl(""), "");
+    assert.equal(
+      absolutizeCaptionUrl("/api/timedtext?v=abc&lang=en"),
+      "https://www.youtube.com/api/timedtext?v=abc&lang=en",
+    );
+    assert.equal(
+      absolutizeCaptionUrl("//www.youtube.com/api/timedtext?v=abc"),
+      "https://www.youtube.com/api/timedtext?v=abc",
+    );
+    assert.equal(
+      absolutizeCaptionUrl("https://www.youtube.com/api/timedtext?v=abc"),
+      "https://www.youtube.com/api/timedtext?v=abc",
     );
   });
 });

@@ -241,6 +241,8 @@ export interface BatchFailure {
   code: string;
   message: string;
   retryable: boolean;
+  /** Present for IP_BLOCKED / RATE_LIMITED so agents show the right fix. */
+  recovery?: CaptionRecovery;
 }
 
 export interface BatchPack {
@@ -376,11 +378,68 @@ export interface ChannelCatalogPageOptions {
 
 export type ChannelExportStatus = "running" | "paused" | "completed";
 
+/**
+ * Live progress event from a channel export — for CLI logs and in-code
+ * `onProgress` handlers so callers see catalog discovery, each video, browser
+ * fallback, retries, and completion.
+ */
+export type ChannelExportProgressPhase =
+  | "starting"
+  | "catalog"
+  | "video_start"
+  | "video_ok"
+  | "video_fail"
+  | "browser_fallback"
+  | "retry_wait"
+  | "paused"
+  | "completed";
+
+export interface ChannelExportProgress {
+  phase: ChannelExportProgressPhase;
+  jobId: string;
+  channelId: string;
+  title?: string;
+  /** 0-based catalog index currently being processed. */
+  index: number;
+  total: number;
+  videoId?: string;
+  videoTitle?: string;
+  contentType?: ChannelItemContentType;
+  succeeded: number;
+  failed: number;
+  /** Attempt number for the current video (1 = first try). */
+  attempt?: number;
+  message: string;
+  error?: BatchFailure;
+  recovery?: CaptionRecovery;
+  elapsedMs: number;
+  /** 0–100 based on cursor / total. */
+  percent: number;
+}
+
 /** Options for a checkpointed full-channel JSONL analysis export. */
 export interface ChannelExportOptions extends PackOptions {
   contentType?: ChannelCatalogContentFilter;
   /** Resume a prior deterministic export. Usually copied from a previous result. */
   jobId?: string;
+  /**
+   * Automatically enable the headless-browser transcript fallback for this run
+   * (`YTUBE_BROWSER=1`) so IP-blocked timedtext does not stop the export cold.
+   */
+  autoBrowser?: boolean;
+  /**
+   * Keep working until every catalog item is packed or permanently failed.
+   * On `IP_BLOCKED` / `RATE_LIMITED`: retry with browser, wait, retry again
+   * (see `maxRetryRounds`), then record a failure and continue — does not pause
+   * the whole job. Default false (MCP/library keep pause-on-block behavior).
+   */
+  untilDone?: boolean;
+  /** Retries per video when blocked (default 3 when `untilDone`). */
+  maxRetryRounds?: number;
+  /** Pause between blocked retries in ms (default 5000). */
+  retryDelayMs?: number;
+  /** Live progress callback (CLI prints these; agents can stream them). */
+  onProgress?: (event: ChannelExportProgress) => void;
 }
 
 /** Summary returned by the checkpointed channel export operation. */
@@ -399,6 +458,8 @@ export interface ChannelExportResult {
   processedVideos: number;
   processedShorts: number;
   lastError?: BatchFailure;
+  /** True when autoBrowser turned on the Playwright path for this run. */
+  browserUsed?: boolean;
 }
 
 export interface SearchResult {
@@ -539,6 +600,36 @@ export interface TranscriptDiagnosis {
   browserConfigured?: boolean;
   /** Whether Playwright is installed so the browser fallback can actually run. */
   browserAvailable?: boolean;
+  /**
+   * What to do next when `ok` is false — especially for IP blocks where tracks
+   * exist but timedtext (and sometimes the Show transcript panel) will not load.
+   */
+  recovery?: CaptionRecovery;
+}
+
+/** Actionable next steps when caption download is blocked or unavailable. */
+export interface CaptionRecovery {
+  /** Machine-readable failure class for agents. */
+  kind:
+    | "proxy_required"
+    | "browser_or_proxy"
+    | "wait_or_proxy"
+    | "install_playwright"
+    | "no_captions"
+    | "other";
+  /** One-line summary for UIs / agent replies. */
+  summary: string;
+  /** Ordered steps the caller should try. */
+  actions: string[];
+  /** True when caption tracks were found but the body could not be downloaded. */
+  tracksExist?: boolean;
+  /** True when timedtext returned the Sorry… IP block. */
+  timedtextBlocked?: boolean;
+  /**
+   * True when the watch-page Show transcript path is also unusable for this
+   * video (FAILED_PRECONDITION / CC unavailable) — browser alone will not help.
+   */
+  panelUnavailable?: boolean;
 }
 
 /** Controls transcript fetching and presentation. */

@@ -36,6 +36,7 @@
     "smoke": "node scripts/smoke.mjs",
     "verify:browser": "npm run build && node scripts/browser-transcript-verify.mjs",
     "verify:browser-batch": "npm run build && node scripts/browser-batch-verify.mjs",
+    "channel:export": "npm run build && node scripts/channel-export.mjs",
     "prepublishOnly": "npm test"
   },
   "keywords": [

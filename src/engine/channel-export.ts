@@ -19,14 +19,22 @@ import type {
   BatchFailure,
   ChannelCatalogItem,
   ChannelExportOptions,
+  ChannelExportProgress,
+  ChannelExportProgressPhase,
   ChannelExportResult,
   ChannelExportStatus,
   ChannelItemContentType,
   Transcript,
   VideoPack,
 } from "./types.js";
+import { recoveryFromError } from "./caption-recovery.js";
+import { closeBrowser } from "./browser-transcript.js";
 
-export type { ChannelExportOptions, ChannelExportResult } from "./types.js";
+export type {
+  ChannelExportOptions,
+  ChannelExportProgress,
+  ChannelExportResult,
+} from "./types.js";
 
 const STATE_VERSION = 1;
 const FATAL_EXPORT_CODES = new Set([
@@ -36,6 +44,14 @@ const FATAL_EXPORT_CODES = new Set([
   "NETWORK_ERROR",
   "TIMEOUT",
   "ACCESS_DENIED",
+]);
+/** Codes we can often clear by switching to the browser path / waiting. */
+const RETRYABLE_BLOCK_CODES = new Set([
+  "IP_BLOCKED",
+  "RATE_LIMITED",
+  "RATE_BUDGET_EXCEEDED",
+  // Transient anti-bot "sign in to confirm you're not a bot" waves — not real age gates.
+  // Real age walls stay AUTH_REQUIRED and are not retried here.
 ]);
 const exportLocks = new Map<string, Promise<void>>();
 
@@ -169,6 +185,7 @@ async function writeState(state: ExportState): Promise<void> {
 
 function failureFor(item: ChannelCatalogItem, err: unknown): BatchFailure {
   if (isExtractError(err)) {
+    const recovery = err.details?.recovery;
     return {
       videoId: item.id,
       title: item.title || undefined,
@@ -176,6 +193,10 @@ function failureFor(item: ChannelCatalogItem, err: unknown): BatchFailure {
       code: err.code,
       message: err.message,
       retryable: err.retryable,
+      recovery:
+        recovery && typeof recovery === "object"
+          ? (recovery as BatchFailure["recovery"])
+          : undefined,
     };
   }
   return {
@@ -205,7 +226,7 @@ function catalogFailure(err: unknown): BatchFailure {
   };
 }
 
-function resultFor(state: ExportState): ChannelExportResult {
+function resultFor(state: ExportState, extra?: { browserUsed?: boolean }): ChannelExportResult {
   return {
     jobId: state.jobId,
     channelId: state.channelId,
@@ -221,8 +242,81 @@ function resultFor(state: ExportState): ChannelExportResult {
     processedVideos: state.processedVideos,
     processedShorts: state.processedShorts,
     lastError: state.lastError,
+    browserUsed: extra?.browserUsed,
   };
 }
+
+function progressPercent(cursor: number, total: number): number {
+  if (total <= 0) return 0;
+  return Math.min(100, Math.round((cursor / total) * 100));
+}
+
+function emitProgress(
+  opts: ChannelExportOptions,
+  state: ExportState,
+  startedAt: number,
+  phase: ChannelExportProgressPhase,
+  message: string,
+  extra: Partial<ChannelExportProgress> = {},
+): void {
+  const total = state.catalogVideos;
+  const event: ChannelExportProgress = {
+    phase,
+    jobId: state.jobId,
+    channelId: state.channelId,
+    title: state.title || undefined,
+    index: state.cursor,
+    total,
+    succeeded: state.succeeded,
+    failed: state.failed,
+    message,
+    elapsedMs: Date.now() - startedAt,
+    percent: progressPercent(state.cursor, total),
+    ...extra,
+  };
+  try {
+    opts.onProgress?.(event);
+  } catch {
+    // Progress handlers must never abort the export.
+  }
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new ExtractError({ code: "ABORTED", message: "aborted" }));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new ExtractError({ code: "ABORTED", message: "aborted" }));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** Default console progress logger for CLIs / scripts. */
+export function defaultChannelExportLogger(event: ChannelExportProgress): void {
+  const stamp = new Date().toISOString().slice(11, 19);
+  const pos = event.total > 0 ? `[${Math.min(event.index + 1, event.total)}/${event.total}]` : "";
+  const pct = `${event.percent}%`;
+  const counts = `ok=${event.succeeded} fail=${event.failed}`;
+  console.error(
+    `${stamp} ${pct.padStart(4)} ${pos.padEnd(12)} ${event.phase.padEnd(16)} ${counts}  ${event.message}`,
+  );
+  if (event.recovery) {
+    console.error(`         → ${event.recovery.kind}: ${event.recovery.summary}`);
+    for (const action of event.recovery.actions.slice(0, 2)) {
+      console.error(`           • ${action}`);
+    }
+  }
+}
+
 
 async function appendRecord(path: string, record: SuccessRecord | FailureRecord): Promise<void> {
   await appendFile(path, JSON.stringify(record) + "\n", { encoding: "utf8", mode: 0o644 });
@@ -290,7 +384,11 @@ async function reconcileState(state: ExportState): Promise<void> {
 
 /**
  * Exports every requested channel item into a resumable JSONL dataset.
- * Transient global failures pause at the current item so a later call retries it.
+ *
+ * By default, transient global failures (`IP_BLOCKED`, …) pause at the current
+ * item so a later call retries it. Pass `untilDone: true` (and usually
+ * `autoBrowser: true`) to retry blocked videos in-process, then continue until
+ * the catalog is finished — with live `onProgress` events for CLI/status UIs.
  */
 export async function exportChannelAnalysis(
   engine: Engine,
@@ -311,30 +409,46 @@ export async function exportChannelAnalysis(
     });
   }
 
-  return withExportLock(jobId, async () => {
-    const dir = exportRoot(engine);
-    await mkdir(dir, { recursive: true, mode: 0o755 });
-    return withFileLock(join(dir, jobId + ".lock"), "EXPORT_BUSY", signal, async () => {
-      try {
-        return await runExportJob(engine, {
-          channelId,
-          key,
-          jobId,
-          dir,
-          opts,
-          signal,
-        });
-      } finally {
-        // Free Chromium after this export slice (completed or paused).
+  const autoBrowser = opts.autoBrowser === true || opts.untilDone === true;
+  const prevBrowser = process.env.YTUBE_BROWSER;
+  let browserUsed = false;
+  if (autoBrowser) {
+    process.env.YTUBE_BROWSER = "1";
+    browserUsed = true;
+  }
+
+  try {
+    return await withExportLock(jobId, async () => {
+      const dir = exportRoot(engine);
+      await mkdir(dir, { recursive: true, mode: 0o755 });
+      return withFileLock(join(dir, jobId + ".lock"), "EXPORT_BUSY", signal, async () => {
         try {
-          const { releaseBrowserIfEnabled } = await import("./browser-transcript.js");
-          await releaseBrowserIfEnabled();
-        } catch {
-          // best-effort
+          const result = await runExportJob(engine, {
+            channelId,
+            key,
+            jobId,
+            dir,
+            opts,
+            signal,
+          });
+          return { ...result, browserUsed: browserUsed || result.browserUsed };
+        } finally {
+          // Free Chromium after this export slice (completed or paused).
+          try {
+            const { releaseBrowserIfEnabled } = await import("./browser-transcript.js");
+            await releaseBrowserIfEnabled();
+          } catch {
+            // best-effort
+          }
         }
-      }
+      });
     });
-  });
+  } finally {
+    if (autoBrowser) {
+      if (prevBrowser === undefined) delete process.env.YTUBE_BROWSER;
+      else process.env.YTUBE_BROWSER = prevBrowser;
+    }
+  }
 }
 
 async function runExportJob(
@@ -351,6 +465,10 @@ async function runExportJob(
   const { channelId, key, jobId, dir, opts, signal } = args;
   const dataPath = join(dir, jobId + ".jsonl");
   const checkpointPath = join(dir, jobId + ".state.json");
+  const startedAt = Date.now();
+  const untilDone = opts.untilDone === true;
+  const maxRounds = Math.max(1, opts.maxRetryRounds ?? (untilDone ? 3 : 1));
+  const retryDelayMs = Math.max(0, opts.retryDelayMs ?? 5_000);
   let state = await readState(checkpointPath);
 
   if (state !== undefined) {
@@ -409,7 +527,10 @@ async function runExportJob(
     await writeState(state);
   }
 
+  emitProgress(opts, state, startedAt, "starting", `Export job ${jobId} for ${channelId}`);
+
   if (!state.catalogReady) {
+    emitProgress(opts, state, startedAt, "catalog", "Discovering Videos / Shorts catalog…");
     try {
       const catalog = await discoverChannelCatalog(
         engine,
@@ -421,10 +542,20 @@ async function runExportJob(
       state.catalogItems = catalog.items;
       state.catalogVideos = catalog.items.length;
       state.catalogReady = true;
+      emitProgress(
+        opts,
+        state,
+        startedAt,
+        "catalog",
+        `Catalog ready: ${catalog.items.length} items (${catalog.title || channelId})`,
+      );
     } catch (err) {
       state.status = "paused";
       state.lastError = catalogFailure(err);
       await writeState(state);
+      emitProgress(opts, state, startedAt, "paused", `Catalog failed: ${state.lastError.message}`, {
+        error: state.lastError,
+      });
       return resultFor(state);
     }
   }
@@ -439,47 +570,170 @@ async function runExportJob(
     if (signal?.aborted) {
       state.status = "paused";
       await writeState(state);
+      emitProgress(opts, state, startedAt, "paused", "Aborted — resume with the same jobId");
       return resultFor(state);
     }
 
     const item = exportItems[state.cursor]!;
-    try {
-      const { pack, transcript } = await videoPackWithTranscript(
-        engine,
-        item.id,
-        {
-          lang: opts.lang,
-          chunkChars: opts.chunkChars ?? 800,
-          skipSponsors: opts.skipSponsors,
-        },
-        signal,
-      );
-      if (pack.video === null) {
-        throw new Error("Video analysis pack has no metadata");
-      }
-      await appendRecord(dataPath, {
-        type: "video",
-        index: state.cursor,
-        channelId: state.channelId,
-        contentType: item.contentType,
+    let lastFailure: BatchFailure | undefined;
+    let packed = false;
+
+    for (let attempt = 1; attempt <= maxRounds; attempt++) {
+      emitProgress(opts, state, startedAt, "video_start", `${item.title || item.id}`, {
         videoId: item.id,
-        video: pack.video,
-        transcript,
-        chapters: pack.chapters,
-        chapterSource: pack.chapterSource,
-        language: pack.language,
-        chunks: pack.chunks,
-        exportedAt: new Date().toISOString(),
+        videoTitle: item.title || undefined,
+        contentType: item.contentType,
+        attempt,
       });
-      state.succeeded++;
-    } catch (err) {
-      const failure = failureFor(item, err);
-      if (FATAL_EXPORT_CODES.has(failure.code) || signal?.aborted) {
-        state.status = "paused";
-        state.lastError = failure;
-        await writeState(state);
-        return resultFor(state);
+
+      if (attempt > 1) {
+        emitProgress(
+          opts,
+          state,
+          startedAt,
+          "browser_fallback",
+          `Retry #${attempt} (browser/timedtext ladder) for ${item.id}`,
+          { videoId: item.id, videoTitle: item.title || undefined, contentType: item.contentType, attempt },
+        );
+        process.env.YTUBE_BROWSER = "1";
       }
+
+      try {
+        const { pack, transcript } = await videoPackWithTranscript(
+          engine,
+          item.id,
+          {
+            lang: opts.lang,
+            chunkChars: opts.chunkChars ?? 800,
+            skipSponsors: opts.skipSponsors,
+          },
+          signal,
+        );
+        if (pack.video === null) {
+          throw new Error("Video analysis pack has no metadata");
+        }
+        await appendRecord(dataPath, {
+          type: "video",
+          index: state.cursor,
+          channelId: state.channelId,
+          contentType: item.contentType,
+          videoId: item.id,
+          video: pack.video,
+          transcript,
+          chapters: pack.chapters,
+          chapterSource: pack.chapterSource,
+          language: pack.language,
+          chunks: pack.chunks,
+          exportedAt: new Date().toISOString(),
+        });
+        state.succeeded++;
+        packed = true;
+        emitProgress(opts, state, startedAt, "video_ok", `Packed ${item.id} (${transcript.segmentCount} segments)`, {
+          videoId: item.id,
+          videoTitle: item.title || pack.video.title || undefined,
+          contentType: item.contentType,
+          attempt,
+        });
+        break;
+      } catch (err) {
+        lastFailure = failureFor(item, err);
+        const recovery = recoveryFromError(err, {
+          tracksExist: true,
+          timedtextBlocked: RETRYABLE_BLOCK_CODES.has(lastFailure.code),
+          panelUnavailable: isExtractError(err) && err.details?.panelEmpty === true,
+          browserConfigured: (process.env.YTUBE_BROWSER ?? "") !== "",
+        });
+        if (recovery) lastFailure = { ...lastFailure, recovery };
+
+        const isBlock = RETRYABLE_BLOCK_CODES.has(lastFailure.code);
+        const canRetry = untilDone && isBlock && attempt < maxRounds && !signal?.aborted;
+
+        if (canRetry) {
+          emitProgress(
+            opts,
+            state,
+            startedAt,
+            "retry_wait",
+            `${lastFailure.code} on ${item.id} — waiting ${retryDelayMs}ms then retry (${attempt}/${maxRounds})`,
+            {
+              videoId: item.id,
+              videoTitle: item.title || undefined,
+              contentType: item.contentType,
+              attempt,
+              error: lastFailure,
+              recovery,
+            },
+          );
+          // Drop a polluted headless session (anti-bot interstitial cookies) before retry.
+          try {
+            await closeBrowser();
+          } catch {
+            // best-effort
+          }
+          try {
+            await sleep(retryDelayMs, signal);
+          } catch {
+            state.status = "paused";
+            state.lastError = lastFailure;
+            await writeState(state);
+            emitProgress(opts, state, startedAt, "paused", "Aborted during retry wait", {
+              error: lastFailure,
+              recovery,
+            });
+            return resultFor(state);
+          }
+          continue;
+        }
+
+        // Legacy / default: pause the whole job on fatal block so resume retries it.
+        if (!untilDone && (FATAL_EXPORT_CODES.has(lastFailure.code) || signal?.aborted)) {
+          state.status = "paused";
+          state.lastError = lastFailure;
+          await writeState(state);
+          emitProgress(opts, state, startedAt, "paused", `${lastFailure.code}: ${lastFailure.message}`, {
+            videoId: item.id,
+            videoTitle: item.title || undefined,
+            contentType: item.contentType,
+            error: lastFailure,
+            recovery,
+          });
+          return resultFor(state);
+        }
+
+        // untilDone exhausted retries, or non-fatal error: record failure and continue.
+        await appendRecord(dataPath, {
+          type: "failure",
+          index: state.cursor,
+          channelId: state.channelId,
+          contentType: item.contentType,
+          videoId: item.id,
+          title: item.title || undefined,
+          error: lastFailure,
+          exportedAt: new Date().toISOString(),
+        });
+        state.failed++;
+        emitProgress(opts, state, startedAt, "video_fail", `${lastFailure.code}: ${item.id}`, {
+          videoId: item.id,
+          videoTitle: item.title || undefined,
+          contentType: item.contentType,
+          attempt,
+          error: lastFailure,
+          recovery,
+        });
+        break;
+      }
+    }
+
+    if (!packed && lastFailure === undefined) {
+      // Should not happen; treat as internal failure so the cursor still advances.
+      const failure: BatchFailure = {
+        videoId: item.id,
+        title: item.title || undefined,
+        contentType: item.contentType,
+        code: "INTERNAL_ERROR",
+        message: "Export produced neither a pack nor a failure",
+        retryable: false,
+      };
       await appendRecord(dataPath, {
         type: "failure",
         index: state.cursor,
@@ -501,5 +755,12 @@ async function runExportJob(
 
   state.status = "completed";
   await writeState(state);
+  emitProgress(
+    opts,
+    state,
+    startedAt,
+    "completed",
+    `Done — ${state.succeeded} packed, ${state.failed} failed of ${state.catalogVideos}`,
+  );
   return resultFor(state);
 }

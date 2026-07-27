@@ -17,8 +17,11 @@ export {
   resetBrowserJobStats,
 } from "./engine/browser-transcript.js";
 export type { BrowserJobStats } from "./engine/browser-transcript.js";
+export { defaultChannelExportLogger } from "./engine/channel-export.js";
+export type { ChannelExportProgress } from "./engine/types.js";
 
 import { runEngine, type RunOptions } from "./go-bridge.js";
+import { createDispatchEngine } from "./engine/index.js";
 
 export type SubtitleFormat = "srt" | "vtt" | "ass" | "json" | "text" | "chapters";
 export type CommentSort = "top" | "newest";
@@ -90,6 +93,14 @@ export interface ChannelExportOptions extends PackOptions {
   contentType?: ChannelContentType;
   /** Resume a prior checkpointed export. */
   jobId?: string;
+  /** Turn on Playwright browser fallback for this run. */
+  autoBrowser?: boolean;
+  /** Retry IP blocks in-process and continue until the catalog is finished. */
+  untilDone?: boolean;
+  maxRetryRounds?: number;
+  retryDelayMs?: number;
+  /** Live progress events (phase, percent, recovery hints). */
+  onProgress?: (event: import("./engine/types.js").ChannelExportProgress) => void;
 }
 
 export interface AskOptions {
@@ -189,20 +200,36 @@ export class YouTubeClient {
     );
   }
 
-  /** Export full channel analyses to a resumable local JSONL dataset. */
+  /**
+   * Export every video/Short from a creator channel to a resumable JSONL dataset.
+   * Use `untilDone: true` + `autoBrowser: true` + `onProgress` for a full crawl
+   * that retries IP blocks via the browser and prints live status.
+   */
   exportChannelAnalysis(channel: string, opts?: ChannelExportOptions) {
-    return runEngine(
-      "channelpackall",
-      {
-        url: channel,
-        lang: opts?.lang ?? this.options.lang,
-        "chunk-chars": opts?.chunkChars ?? 800,
-        "skip-sponsors": opts?.skipSponsors,
-        "content-type": opts?.contentType,
-        "job-id": opts?.jobId,
-      },
-      this.opts({ timeoutMs: this.options.timeoutMs ?? 15 * 60 * 1000 }),
-    );
+    // Direct engine path so onProgress callbacks work (they cannot cross runEngine JSON).
+    const timeoutMs = this.options.timeoutMs ?? 24 * 60 * 60 * 1000;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    return createDispatchEngine({}, { timeoutMs })
+      .then((engine) =>
+        engine.exportChannelAnalysis(
+          channel,
+          {
+            lang: opts?.lang ?? this.options.lang,
+            chunkChars: opts?.chunkChars ?? 800,
+            skipSponsors: opts?.skipSponsors,
+            contentType: opts?.contentType,
+            jobId: opts?.jobId,
+            autoBrowser: opts?.autoBrowser,
+            untilDone: opts?.untilDone,
+            maxRetryRounds: opts?.maxRetryRounds,
+            retryDelayMs: opts?.retryDelayMs,
+            onProgress: opts?.onProgress,
+          },
+          ac.signal,
+        ),
+      )
+      .finally(() => clearTimeout(timer));
   }
 
   /**
