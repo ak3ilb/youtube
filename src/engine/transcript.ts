@@ -444,6 +444,109 @@ function parseIntOr0(value: string | undefined): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+/**
+ * Parses YouTube compact counts like `2.4M`, `19M`, `208K`, or full integers
+ * with commas (`1,796,960,277`). Returns 0 when nothing usable is found.
+ */
+export function parseCompactCount(raw: string | undefined | null): number {
+  if (raw == null) return 0;
+  const cleaned = String(raw).replace(/,/g, "").trim().toLowerCase();
+  if (cleaned === "") return 0;
+  const m = cleaned.match(/([\d.]+)\s*([kmb])?/);
+  if (!m) return 0;
+  const n = Number.parseFloat(m[1]!);
+  if (!Number.isFinite(n)) return 0;
+  const mult = m[2] === "k" ? 1_000 : m[2] === "m" ? 1_000_000 : m[2] === "b" ? 1_000_000_000 : 1;
+  return Math.round(n * mult);
+}
+
+/**
+ * Merges engagement stats from a watch-page `next` payload into `info`.
+ * Comment totals come from the Comments engagement-panel header; likes/views
+ * fall back to description factoids / like-button titles when the player omit them.
+ */
+export function applyEngagementFromNext(info: VideoInfo, next: unknown): void {
+  if (!next || typeof next !== "object") return;
+  const root = next as Record<string, unknown>;
+
+  const panels = root.engagementPanels;
+  if (Array.isArray(panels)) {
+    for (const panel of panels) {
+      if (!panel || typeof panel !== "object") continue;
+      const list = (panel as Record<string, unknown>).engagementPanelSectionListRenderer as
+        | Record<string, unknown>
+        | undefined;
+      const header = list?.header as Record<string, unknown> | undefined;
+      const titleHeader = header?.engagementPanelTitleHeaderRenderer as Record<string, unknown> | undefined;
+      if (!titleHeader) continue;
+      const title = simpleTextOf(titleHeader.title).toLowerCase();
+      if (!title.includes("comment")) continue;
+      const contextual = titleHeader.contextualInfo;
+      const raw = runsOrSimple(contextual);
+      const n = parseCompactCount(raw);
+      if (n > 0) info.commentCount = n;
+      break;
+    }
+  }
+
+  // Description factoids: Likes / Views labels with exact or compact values.
+  walkEngagement(root, (node) => {
+    const factoid = node.factoidRenderer as Record<string, unknown> | undefined;
+    if (!factoid) return;
+    const label = simpleTextOf(factoid.label).toLowerCase();
+    const value = simpleTextOf(factoid.value);
+    const n = parseCompactCount(value);
+    if (n <= 0) return;
+    if (label.includes("like") && !info.likeCount) info.likeCount = n;
+    if (label.includes("view") && !info.viewCount) info.viewCount = n;
+  });
+
+  // Like button title ("19M") as a last-resort likes fallback.
+  if (!info.likeCount) {
+    walkEngagement(root, (node) => {
+      const btn = node.buttonViewModel as Record<string, unknown> | undefined;
+      if (!btn || btn.iconName !== "LIKE") return;
+      const n = parseCompactCount(typeof btn.title === "string" ? btn.title : undefined);
+      if (n > 0) info.likeCount = n;
+    });
+  }
+}
+
+function simpleTextOf(node: unknown): string {
+  if (node == null) return "";
+  if (typeof node === "string") return node;
+  if (typeof node !== "object") return "";
+  const obj = node as Record<string, unknown>;
+  if (typeof obj.simpleText === "string") return obj.simpleText;
+  return runsOrSimple(node);
+}
+
+function runsOrSimple(node: unknown): string {
+  if (node == null) return "";
+  if (typeof node === "string") return node;
+  if (typeof node !== "object") return "";
+  const obj = node as Record<string, unknown>;
+  if (typeof obj.simpleText === "string") return obj.simpleText;
+  const runs = obj.runs;
+  if (Array.isArray(runs)) {
+    return runs
+      .map((r) => (r && typeof r === "object" && typeof (r as { text?: string }).text === "string" ? (r as { text: string }).text : ""))
+      .join("");
+  }
+  return "";
+}
+
+function walkEngagement(node: unknown, visit: (obj: Record<string, unknown>) => void, depth = 0): void {
+  if (!node || typeof node !== "object" || depth > 14) return;
+  if (Array.isArray(node)) {
+    for (const item of node) walkEngagement(item, visit, depth + 1);
+    return;
+  }
+  const obj = node as Record<string, unknown>;
+  visit(obj);
+  for (const v of Object.values(obj)) walkEngagement(v, visit, depth + 1);
+}
+
 export function parseLangChain(lang: string | undefined): string[] {
   const trimmed = (lang ?? "").trim();
   if (trimmed === "") {
@@ -1079,11 +1182,17 @@ export class Engine {
     const id = parseVideoId(input);
     const cached = await this.client.cache.get<VideoInfo>("info", id);
     if (cached !== undefined) {
+      // Older cache entries may lack commentCount — fill once, then re-cache.
+      if (cached.commentCount === undefined && process.env.YTUBE_RICH_METADATA !== "0") {
+        await this.enrichEngagement(id, cached, signal);
+        await this.client.cache.set("info", id, cached);
+      }
       return cached;
     }
     const { player } = await this.fetchPlayer(id, signal);
     const info = infoFromPlayer(id, player);
     await this.enrichMicroformat(id, info, signal);
+    await this.enrichEngagement(id, info, signal);
     await this.client.cache.set("info", id, info);
     return info;
   }
@@ -1136,6 +1245,31 @@ export class Engine {
     }
     info.isFamilySafe = info.isFamilySafe || micro.isFamilySafe === true;
     info.isUnlisted = info.isUnlisted === true || micro.isUnlisted === true ? true : undefined;
+  }
+
+  /**
+   * Fills `commentCount` (and likes/views when missing) from the watch-page
+   * `next` response — Comments panel contextualInfo + description factoids.
+   */
+  async enrichEngagement(id: string, info: VideoInfo, signal?: AbortSignal): Promise<void> {
+    if (info.commentCount !== undefined && (info.likeCount ?? 0) > 0 && (info.viewCount ?? 0) > 0) {
+      return;
+    }
+    if (process.env.YTUBE_RICH_METADATA === "0") {
+      return;
+    }
+    let next: unknown;
+    try {
+      next = await this.client.callJSON(
+        "next",
+        clientWEB,
+        { videoId: id, contentCheckOk: true, racyCheckOk: true },
+        { signal },
+      );
+    } catch {
+      return;
+    }
+    applyEngagementFromNext(info, next);
   }
 
   // -------------------------------------------------------------- captions

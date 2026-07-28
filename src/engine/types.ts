@@ -38,6 +38,8 @@ export interface VideoInfo {
   duration?: string;
   viewCount?: number;
   likeCount?: number;
+  /** Total top-level + reply comments when YouTube exposes the count. */
+  commentCount?: number;
   publishDate?: string;
   uploadDate?: string;
   category?: string;
@@ -192,6 +194,8 @@ export interface VideoPack {
   chunks: RAGChunk[];
   markdown: string;
   howToCite: string;
+  /** Top comments when `includeComments` was requested on the pack. */
+  comments?: Comment[];
   sponsorSegments?: SponsorSegment[];
   removedSeconds?: number;
   cacheHit?: boolean;
@@ -670,6 +674,11 @@ export interface PackOptions {
   chunkChars?: number;
   /** Remove SponsorBlock-flagged ranges from the chunked text. */
   skipSponsors?: boolean;
+  /**
+   * Attach top comment threads to the pack. `true` = 20 comments; a positive
+   * number caps how many (max 100).
+   */
+  includeComments?: boolean | number;
 }
 
 /** Controls batch pack sizing and resume position. */

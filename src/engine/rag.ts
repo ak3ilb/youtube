@@ -11,6 +11,7 @@ import { formatTimestamp, watchURLAt } from "./timestamps.js";
 import type { Engine } from "./transcript.js";
 import type {
   Chapter,
+  Comment,
   PackOptions,
   RAGChunk,
   SponsorSegment,
@@ -19,6 +20,7 @@ import type {
   VideoInfo,
   VideoPack,
 } from "./types.js";
+import { commentsWithOptions, DEFAULT_COMMENT_LIMIT, MAX_COMMENT_LIMIT } from "./comments.js";
 
 export type { PackOptions, RAGChunk, VideoPack } from "./types.js";
 
@@ -100,11 +102,21 @@ export function renderPackMarkdown(
   chapters: Chapter[],
   chunks: RAGChunk[],
   lang: string,
+  comments?: Comment[],
 ): string {
   let b = `# ${info.title}\n\n`;
   b += `- URL: ${info.url}\n`;
   b += `- Channel: ${info.channelName}\n`;
   b += `- Duration: ${formatTimestamp(info.durationSeconds)}\n`;
+  if (info.viewCount !== undefined) {
+    b += `- Views: ${info.viewCount.toLocaleString("en-US")}\n`;
+  }
+  if (info.likeCount !== undefined) {
+    b += `- Likes: ${info.likeCount.toLocaleString("en-US")}\n`;
+  }
+  if (info.commentCount !== undefined) {
+    b += `- Comments: ${info.commentCount.toLocaleString("en-US")}\n`;
+  }
   if (lang !== "") {
     b += `- Transcript language: ${lang}\n`;
   }
@@ -115,6 +127,13 @@ export function renderPackMarkdown(
     b += "\n## Chapters\n\n";
     for (const ch of chapters) {
       b += `- [${ch.timestamp}] ${ch.title}\n`;
+    }
+  }
+  if (comments && comments.length > 0) {
+    b += "\n## Top comments\n\n";
+    for (const cm of comments) {
+      const likes = cm.likeCount ? ` (${cm.likeCount} likes)` : "";
+      b += `- **${cm.author}**${likes}: ${cm.text}\n`;
     }
   }
   b += "\n## Transcript chunks\n\n";
@@ -156,8 +175,9 @@ export async function videoPackWithTranscript(
   signal?: AbortSignal,
 ): Promise<{ pack: VideoPack; transcript: Transcript }> {
   const id = parseVideoId(input);
-  const cacheKey = `${id}|${opts.lang ?? ""}|${opts.chunkChars ?? 0}|${opts.skipSponsors === true}`;
-  const cached = await engine.client.cache.get<VideoPack>("videopack2", cacheKey);
+  const commentLimit = resolveCommentLimit(opts.includeComments);
+  const cacheKey = `${id}|${opts.lang ?? ""}|${opts.chunkChars ?? 0}|${opts.skipSponsors === true}|c${commentLimit}`;
+  const cached = await engine.client.cache.get<VideoPack>("videopack3", cacheKey);
   if (cached !== undefined) {
     cached.cacheHit = true;
     const transcript = await engine.transcript(input, opts.lang, signal);
@@ -185,6 +205,21 @@ export async function videoPackWithTranscript(
     removed = stripped.removedSeconds;
   }
 
+  let comments: Comment[] | undefined;
+  if (commentLimit > 0) {
+    try {
+      const result = await commentsWithOptions(
+        engine,
+        id,
+        { limit: commentLimit, sort: "top" },
+        signal,
+      );
+      comments = result.comments;
+    } catch {
+      comments = undefined;
+    }
+  }
+
   const chunks = buildRAGChunks(id, segments, opts.chunkChars ?? 0);
   // Key order mirrors the Go struct so serialized packs are byte-comparable.
   const pack: VideoPack = {
@@ -195,11 +230,27 @@ export async function videoPackWithTranscript(
     mergedAsr: transcript.merged,
     chunkCount: chunks.length,
     chunks,
-    markdown: renderPackMarkdown(info, chapterResult.chapters, chunks, transcript.languageCode),
+    markdown: renderPackMarkdown(
+      info,
+      chapterResult.chapters,
+      chunks,
+      transcript.languageCode,
+      comments,
+    ),
     howToCite: HOW_TO_CITE_PACK,
+    comments: comments && comments.length > 0 ? comments : undefined,
     sponsorSegments: sponsors.length > 0 ? sponsors : undefined,
     removedSeconds: removed !== 0 ? removed : undefined,
   };
-  await engine.client.cache.set("videopack2", cacheKey, pack);
+  await engine.client.cache.set("videopack3", cacheKey, pack);
   return { pack, transcript: transcriptWithSegments(transcript, segments) };
+}
+
+/** Resolves PackOptions.includeComments into a fetch limit (0 = skip). */
+function resolveCommentLimit(include: boolean | number | undefined): number {
+  if (include === true) return DEFAULT_COMMENT_LIMIT;
+  if (typeof include === "number" && Number.isFinite(include) && include > 0) {
+    return Math.min(Math.floor(include), MAX_COMMENT_LIMIT);
+  }
+  return 0;
 }

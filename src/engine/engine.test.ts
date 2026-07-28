@@ -3,7 +3,8 @@ import { describe, it } from "node:test";
 
 import { formatTimestamp, parseTimestamp, watchURLAt } from "./timestamps.js";
 import { parseVideoID, parsePlaylistID } from "./ids.js";
-import { parseLangChain, pickCaptionTrack, mergeASRSegments, normalizeCaptionText, absolutizeCaptionUrl } from "./transcript.js";
+import { parseLangChain, pickCaptionTrack, mergeASRSegments, normalizeCaptionText, absolutizeCaptionUrl, parseCompactCount, applyEngagementFromNext } from "./transcript.js";
+import type { VideoInfo } from "./types.js";
 import { parseChapters } from "./chapters.js";
 import { pageTranscript } from "./paging.js";
 import { buildRAGChunks } from "./rag.js";
@@ -62,6 +63,37 @@ describe("caption URLs", () => {
       absolutizeCaptionUrl("https://www.youtube.com/api/timedtext?v=abc"),
       "https://www.youtube.com/api/timedtext?v=abc",
     );
+  });
+});
+
+describe("engagement counts", () => {
+  it("parses compact and full YouTube count strings", () => {
+    assert.equal(parseCompactCount("2.4M"), 2_400_000);
+    assert.equal(parseCompactCount("19M"), 19_000_000);
+    assert.equal(parseCompactCount("208K"), 208_000);
+    assert.equal(parseCompactCount("1.7B"), 1_700_000_000);
+    assert.equal(parseCompactCount("1,796,960,277"), 1_796_960_277);
+    assert.equal(parseCompactCount("2.4M comments"), 2_400_000);
+    assert.equal(parseCompactCount(""), 0);
+  });
+
+  it("fills commentCount from the Comments engagement panel", () => {
+    const info = { id: "x" } as VideoInfo;
+    applyEngagementFromNext(info, {
+      engagementPanels: [
+        {
+          engagementPanelSectionListRenderer: {
+            header: {
+              engagementPanelTitleHeaderRenderer: {
+                title: { simpleText: "Comments" },
+                contextualInfo: { runs: [{ text: "2.4M" }] },
+              },
+            },
+          },
+        },
+      ],
+    });
+    assert.equal(info.commentCount, 2_400_000);
   });
 });
 

@@ -51,7 +51,7 @@ server.registerTool(
   {
     title: "Get video info",
     description:
-      "Fetch metadata for a single YouTube video: title, description, channel, duration, view count, publish date, category, keywords and thumbnails.",
+      "Fetch metadata for a single YouTube video: title, description, channel, duration, view count, like count, comment count, publish date, category, keywords and thumbnails.",
     inputSchema: { urlOrId },
   },
   async ({ urlOrId }) => handle(() => runEngine("info", { url: urlOrId })),
@@ -246,7 +246,7 @@ server.registerTool(
   {
     title: "Get video analysis pack (RAG)",
     description:
-      "Build an agent-ready briefing for one video: metadata, chapters, citation-tagged transcript chunks (each with a [1:07:12] citation and a url that opens the video at that moment), and a markdown document for RAG/chat context. Uses disk cache so repeat analysis does not re-hit YouTube.",
+      "Build an agent-ready briefing for one video: metadata (including views, likes, comment count), chapters, citation-tagged transcript chunks (each with a [1:07:12] citation and a url that opens the video at that moment), optional top comments, and a markdown document for RAG/chat context. Uses disk cache so repeat analysis does not re-hit YouTube.",
     inputSchema: {
       urlOrId,
       lang,
@@ -261,13 +261,28 @@ server.registerTool(
         .boolean()
         .optional()
         .describe("Remove SponsorBlock-flagged ranges; requires YTUBE_SPONSORBLOCK=1"),
+      includeComments: z
+        .union([z.boolean(), z.number().int().positive().max(100)])
+        .optional()
+        .describe("Attach top comments: true=20, or a number up to 100"),
     },
   },
-  async ({ urlOrId, lang, chunkChars, skipSponsors }) =>
+  async ({ urlOrId, lang, chunkChars, skipSponsors, includeComments }) =>
     handle(() =>
       runEngine(
         "videopack",
-        { url: urlOrId, lang, "chunk-chars": chunkChars ?? 800, "skip-sponsors": skipSponsors },
+        {
+          url: urlOrId,
+          lang,
+          "chunk-chars": chunkChars ?? 800,
+          "skip-sponsors": skipSponsors,
+          "include-comments":
+            includeComments === true
+              ? 20
+              : typeof includeComments === "number"
+                ? includeComments
+                : undefined,
+        },
         { timeoutMs: 180_000 },
       ),
     ),

@@ -529,6 +529,7 @@ export async function dispatch(
           lang,
           chunkChars: flagInt(flags, "chunk-chars", 800),
           skipSponsors: flagBool(flags, "skip-sponsors"),
+          includeComments: flagInt(flags, "include-comments", 0) || undefined,
         },
         signal,
       );

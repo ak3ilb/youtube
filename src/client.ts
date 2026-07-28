@@ -64,6 +64,11 @@ export interface PackOptions {
   chunkChars?: number;
   /** Drop SponsorBlock-flagged ranges (needs `YTUBE_SPONSORBLOCK=1`). */
   skipSponsors?: boolean;
+  /**
+   * Attach top comment threads. `true` = 20; a positive number caps how many
+   * (max 100).
+   */
+  includeComments?: boolean | number;
 }
 
 export interface BatchPackOptions extends PackOptions {
@@ -130,7 +135,7 @@ export class YouTubeClient {
     return { timeoutMs: this.options.timeoutMs, ...extra };
   }
 
-  /** Video metadata: title, channel, duration, views, thumbnails, … */
+  /** Video metadata: title, channel, duration, views, likes, comment count, thumbnails, … */
   getVideoInfo(urlOrId: string) {
     return runEngine("info", { url: urlOrId }, this.opts());
   }
@@ -147,6 +152,12 @@ export class YouTubeClient {
         lang: opts?.lang ?? this.options.lang,
         "chunk-chars": opts?.chunkChars ?? 800,
         "skip-sponsors": opts?.skipSponsors,
+        "include-comments":
+          opts?.includeComments === true
+            ? 20
+            : typeof opts?.includeComments === "number"
+              ? opts.includeComments
+              : undefined,
       },
       this.opts({ timeoutMs: this.options.timeoutMs ?? 180_000 }),
     );
